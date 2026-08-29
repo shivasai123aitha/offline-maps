@@ -14,7 +14,14 @@ import "leaflet/dist/leaflet.css";
 import "./App.css";
 
 // Services
-import { getBuiltinNetwork, fetchRoadNetwork, findNearestNode, haversine } from "./services/osmService.js";
+import {
+  getBuiltinNetwork,
+  fetchRoadNetwork,
+  findNearestNode,
+  haversine,
+  fetchGlobalRoute,
+  buildCorridorGraph,
+} from "./services/osmService.js";
 import { RoadGraph } from "./models/RoadGraph.js";
 import { CacheManager } from "./services/cacheManager.js";
 import { aStar } from "./algorithms/astar.js";
@@ -27,6 +34,7 @@ import {
   computeETA,
 } from "./services/navigationEngine.js";
 import { GPSSimulator } from "./services/gpsSimulator.js";
+import { RealGPSTracker } from "./services/realGpsService.js";
 import { NetworkMonitor, NET_STATE } from "./services/networkMonitor.js";
 
 
@@ -190,9 +198,11 @@ function App() {
   const [mapViewCenter, setMapViewCenter] = useState(DEFAULT_CENTER);
   const [mapViewZoom, setMapViewZoom] = useState(DEFAULT_ZOOM);
   const [followVehicle, setFollowVehicle] = useState(true);
+  const [gpsMode, setGpsMode] = useState("simulation"); // "simulation" | "real"
 
   // ── Refs ───────────────────────────────────────────────
   const gpsRef = useRef(null);
+  const realGpsRef = useRef(null);
   const netRef = useRef(null);
   const graphRef = useRef(null);
 
@@ -259,12 +269,11 @@ function App() {
       setNetInfo(monitor.getInfo());
       monitor.onChange((info) => setNetInfo(info));
 
-      // Init GPS simulator
+      // Init GPS simulator & Real GPS
       const gps = new GPSSimulator();
       gpsRef.current = gps;
-
-      // Try live fetch in background (non-blocking)
-      tryLiveFetch(graph);
+      const realGps = new RealGPSTracker();
+      realGpsRef.current = realGps;
 
       setLoading(false);
     }
@@ -273,31 +282,10 @@ function App() {
 
     return () => {
       gpsRef.current?.destroy();
+      realGpsRef.current?.destroy();
       netRef.current?.destroy();
     };
   }, []);
-
-
-  // ── Live OSM fetch (background, non-blocking) ─────────
-  async function tryLiveFetch(existingGraph) {
-    try {
-      const bbox = existingGraph.boundingBox;
-      const liveData = await fetchRoadNetwork(
-        bbox.south, bbox.west, bbox.north, bbox.east
-      );
-      const liveGraph = new RoadGraph(liveData);
-
-      if (liveGraph.nodeCount > existingGraph.nodeCount) {
-        graphRef.current = liveGraph;
-        setRoadGraph(liveGraph);
-        CacheManager.save(liveGraph);
-        setCacheInfo(CacheManager.getDisplayInfo());
-        addLog("🌐 Live OSM data loaded", null);
-      }
-    } catch {
-      // Silently fail — we have the built-in data
-    }
-  }
 
 
   // ── Map click handler ──────────────────────────────────
@@ -314,93 +302,126 @@ function App() {
   }
 
 
+  // ── Route Presets (Local & Inter-City Long Distance) ──
+  const ROUTE_PRESETS = [
+    {
+      id: "vijayawada",
+      label: "⚡ Vijayawada (15 km)",
+      start: { lat: 16.4898, lon: 80.6291 },
+      dest: { lat: 16.5524, lon: 80.7131 },
+    },
+    {
+      id: "hubballi_ballari",
+      label: "🛣️ Hubballi → Ballari (150 km)",
+      start: { lat: 15.3647, lon: 75.1240 },
+      dest: { lat: 15.1394, lon: 76.9214 },
+    },
+    {
+      id: "hyderabad_vijayawada",
+      label: "🚀 Hyderabad → Vijayawada (275 km)",
+      start: { lat: 17.3850, lon: 78.4867 },
+      dest: { lat: 16.5062, lon: 80.6480 },
+    },
+    {
+      id: "bengaluru_tirupati",
+      label: "🌲 Bengaluru → Tirupati (250 km)",
+      start: { lat: 12.9716, lon: 77.5946 },
+      dest: { lat: 13.6288, lon: 79.4192 },
+    },
+  ];
+
+  function handleSelectPreset(preset) {
+    setStartPoint(preset.start);
+    setDestPoint(preset.dest);
+    setMapViewCenter([
+      (preset.start.lat + preset.dest.lat) / 2,
+      (preset.start.lon + preset.dest.lon) / 2,
+    ]);
+  }
+
+
   // ── Auto-compute route when both points are set ────────
   useEffect(() => {
-    if (!startPoint || !destPoint || !graphRef.current) return;
+    if (!startPoint || !destPoint) return;
 
     async function calculateRoute() {
-      let graph = graphRef.current;
-      const dist = haversine(startPoint, destPoint);
+      const t0 = performance.now();
 
-      // Check if points are outside current graph's bounding box
-      const bbox = graph.boundingBox;
-      const isOutsideCurrentGraph =
-        startPoint.lat < bbox.south - 0.05 || startPoint.lat > bbox.north + 0.05 ||
-        startPoint.lon < bbox.west - 0.05 || startPoint.lon > bbox.east + 0.05 ||
-        destPoint.lat < bbox.south - 0.05 || destPoint.lat > bbox.north + 0.05 ||
-        destPoint.lon < bbox.west - 0.05 || destPoint.lon > bbox.east + 0.05;
+      // 1. If Online: use high-speed Global OSRM Routing (unlimited distance, sub-100ms)
+      if (netInfo.isOnline) {
+        try {
+          const globalResult = await fetchGlobalRoute(
+            startPoint.lat,
+            startPoint.lon,
+            destPoint.lat,
+            destPoint.lon
+          );
 
-      if (isOutsideCurrentGraph) {
-        if (netInfo.isOnline) {
-          if (dist > 15) {
-            addLog("⚠️ Points too far apart for local download (Max 15km)", null);
-            alert("Selected points are too far apart to download local road data (Max 15km). Please select points closer to each other.");
-            return;
+          const elapsed = performance.now() - t0;
+
+          // Build Smart Corridor Graph along this route for offline A* resilience
+          const corridorData = buildCorridorGraph(globalResult);
+          const corridorGraph = new RoadGraph(corridorData);
+          graphRef.current = corridorGraph;
+          setRoadGraph(corridorGraph);
+
+          // Save corridor graph to cache
+          CacheManager.save(corridorGraph);
+          setCacheInfo(CacheManager.getDisplayInfo());
+
+          // Set Route Result & GPS track
+          if (gpsRef.current) {
+            gpsRef.current.setRoute(globalResult.coords);
+            gpsRef.current.reset();
           }
+          setSimRunning(false);
+          setVehiclePos(null);
+          setOffRouteInfo(null);
+          setRerouteResult(null);
 
-          try {
-            setLoading(true);
-            setLoadingMsg("Downloading local road network for this area…");
-            
-            // Compute bounding box containing both points + 1.5km buffer
-            const minLat = Math.min(startPoint.lat, destPoint.lat);
-            const maxLat = Math.max(startPoint.lat, destPoint.lat);
-            const minLon = Math.min(startPoint.lon, destPoint.lon);
-            const maxLon = Math.max(startPoint.lon, destPoint.lon);
-            
-            const latBuf = 1.5 / 111.32;
-            const lonBuf = 1.5 / (111.32 * Math.cos((minLat + maxLat) / 2 * Math.PI / 180));
-            
-            const liveData = await fetchRoadNetwork(
-              minLat - latBuf,
-              minLon - lonBuf,
-              maxLat + latBuf,
-              maxLon + lonBuf
-            );
-            
-            const newGraph = new RoadGraph(liveData);
-            graphRef.current = newGraph;
-            setRoadGraph(newGraph);
-            CacheManager.save(newGraph);
-            setCacheInfo(CacheManager.getDisplayInfo());
-            graph = newGraph;
-            addLog(`🌐 Downloaded road network for new area`, null);
-          } catch (err) {
-            console.error(err);
-            addLog("⚠️ Failed to download road network", null);
-            alert("Could not download road network for this area. Please try again or select points inside the cached Vijayawada area.");
-            setLoading(false);
-            return;
-          } finally {
-            setLoading(false);
+          setRouteResult(globalResult);
+          setInstructions(globalResult.instructions);
+          const firstTurn = globalResult.instructions.find((ins) => ins.maneuver !== "depart") || globalResult.instructions[0];
+          setCurrentInstr(firstTurn || null);
+          setDistRemaining(globalResult.distance);
+          setEta(globalResult.time);
+
+          // Fit map bounds to show full route
+          let minLat = Infinity, maxLat = -Infinity;
+          let minLon = Infinity, maxLon = -Infinity;
+          for (let i = 0; i < globalResult.coords.length; i++) {
+            const [cLat, cLon] = globalResult.coords[i];
+            if (cLat < minLat) minLat = cLat;
+            if (cLat > maxLat) maxLat = cLat;
+            if (cLon < minLon) minLon = cLon;
+            if (cLon > maxLon) maxLon = cLon;
           }
-        } else {
-          addLog("⚠️ Offline: Points outside cached area", null);
-          alert("You are offline. Please select points inside the cached area (Vijayawada) or click 'Zoom to Cached Area'.");
+          setMapViewCenter([(minLat + maxLat) / 2, (minLon + maxLon) / 2]);
+
+          addLog(`🌐 Smart Route: ${globalResult.distance} km, ${globalResult.coords.length} pts (Corridor cached)`, elapsed);
           return;
+        } catch (err) {
+          console.warn("Global routing failed, falling back to local road graph:", err);
+          // Fall through to local graph
         }
       }
+
+      // 2. If Offline (or fallback): use local RoadGraph with A* pathfinding
+      const graph = graphRef.current;
+      if (!graph) return;
 
       const startResult = findNearestNode(graph.nodes, startPoint.lat, startPoint.lon);
       const goalResult = findNearestNode(graph.nodes, destPoint.lat, destPoint.lon);
 
       if (!startResult.nodeId || !goalResult.nodeId) {
-        addLog("⚠️ Points are outside the road network", null);
+        addLog("⚠️ Points are outside cached road network (connect online for global routing)", null);
         return;
       }
 
-      // Check if snapped distance is unreasonably far from clicked point
-      if (startResult.distance > 2 || goalResult.distance > 2) {
-        addLog("⚠️ Snapped point too far from road network", null);
-        return;
-      }
-
-      const t0 = performance.now();
       const result = aStar(graph, startResult.nodeId, goalResult.nodeId);
       const elapsed = performance.now() - t0;
 
       if (result) {
-        // Reset any previous simulation state
         if (gpsRef.current) {
           gpsRef.current.setRoute(result.coords);
           gpsRef.current.reset();
@@ -413,40 +434,23 @@ function App() {
         setRouteResult(result);
         const instrs = generateInstructions(result, graph);
         setInstructions(instrs);
-        const firstTurn = instrs.find(ins => ins.maneuver !== "depart") || instrs[0];
+        const firstTurn = instrs.find((ins) => ins.maneuver !== "depart") || instrs[0];
         setCurrentInstr(firstTurn || null);
         setDistRemaining(result.distance);
         setEta(computeETA(result.distance));
-        addLog(`📍 Route: ${result.distance} km, ${result.path.length} nodes`, elapsed);
+        addLog(`📍 Offline A* Route: ${result.distance} km, ${result.path.length} nodes`, elapsed);
       } else {
-        addLog("⚠️ No route found between these points", elapsed);
+        addLog("⚠️ No route found in local graph", elapsed);
       }
     }
 
     calculateRoute();
-  }, [startPoint, destPoint, netInfo.isOnline]);
+  }, [startPoint, destPoint]);
 
 
   // ── Quick Route (auto pick SW→NE corners) ──────────────
   function handleQuickRoute() {
-    const graph = graphRef.current;
-    if (!graph) return;
-
-    const bbox = graph.boundingBox;
-    const sLat = bbox.south + (bbox.north - bbox.south) * 0.12;
-    const sLon = bbox.west + (bbox.east - bbox.west) * 0.12;
-    const dLat = bbox.north - (bbox.north - bbox.south) * 0.12;
-    const dLon = bbox.east - (bbox.east - bbox.west) * 0.12;
-
-    const center = [
-      (bbox.south + bbox.north) / 2,
-      (bbox.west + bbox.east) / 2,
-    ];
-    setMapViewCenter(center);
-    setMapViewZoom(DEFAULT_ZOOM);
-
-    setStartPoint({ lat: sLat, lon: sLon });
-    setDestPoint({ lat: dLat, lon: dLon });
+    handleSelectPreset(ROUTE_PRESETS[0]);
   }
 
   function handleCenterOnCached() {
@@ -467,76 +471,172 @@ function App() {
   }
 
 
-  // ── Reroute from current position ──────────────────────
-  const reroute = useCallback((lat, lon) => {
-    const graph = graphRef.current;
-    if (!graph) return;
+  // ── Re-route logic (adaptive) ──────────────────────────
+  const reroute = useCallback(
+    async (lat, lon) => {
+      const graph = graphRef.current;
+      const origRoute = routeResult;
+      if (!origRoute || !destPoint) return;
 
-    const startResult = findNearestNode(graph.nodes, lat, lon);
-    const origRoute = routeResult;
-    if (!origRoute || origRoute.path.length === 0) return;
+      const t0 = performance.now();
 
-    const goalId = origRoute.path[origRoute.path.length - 1];
+      // 1. If online: try high-speed OSRM reroute from present location to destination
+      if (netInfo.isOnline) {
+        try {
+          const globalResult = await fetchGlobalRoute(lat, lon, destPoint.lat, destPoint.lon);
+          const elapsed = performance.now() - t0;
 
-    const t0 = performance.now();
-    const newRoute = aStar(graph, startResult.nodeId, goalId);
-    const elapsed = performance.now() - t0;
+          const corridorData = buildCorridorGraph(globalResult);
+          const corridorGraph = new RoadGraph(corridorData);
+          graphRef.current = corridorGraph;
+          setRoadGraph(corridorGraph);
 
-    if (newRoute) {
-      setRerouteResult(newRoute);
-      const newInstrs = generateInstructions(newRoute, graph);
-      setInstructions(newInstrs);
-      setCurrentInstr(newInstrs[0] || null);
+          setRerouteResult(globalResult);
+          setInstructions(globalResult.instructions);
+          const firstTurn = globalResult.instructions.find((ins) => ins.maneuver !== "depart") || globalResult.instructions[0];
+          setCurrentInstr(firstTurn || null);
+          setDistRemaining(globalResult.distance);
+          setEta(globalResult.time);
 
-      addLog(
-        netInfo.isOffline ? "🔴 Offline reroute" : "🔄 Online reroute",
-        elapsed
-      );
+          addLog(`🌐 Online Reroute: ${globalResult.distance} km`, elapsed);
 
-      if (gpsRef.current) {
-        gpsRef.current.setRoute(newRoute.coords);
-        gpsRef.current.returnToRoute();
-        if (simRunning) gpsRef.current.start();
+          if (gpsRef.current) {
+            gpsRef.current.setRoute(globalResult.coords);
+            gpsRef.current.returnToRoute();
+            if (simRunning) gpsRef.current.start();
+          }
+          return;
+        } catch (err) {
+          console.warn("Online reroute fallback to local graph:", err);
+        }
       }
-    } else {
-      addLog("⚠️ No alternate route found", elapsed);
-    }
-  }, [routeResult, netInfo.isOffline, simRunning]);
+
+      // 2. Offline: use in-memory corridor/regional A*
+      if (!graph) return;
+      const startResult = findNearestNode(graph.nodes, lat, lon);
+      const goalId = origRoute.path[origRoute.path.length - 1];
+
+      const newRoute = aStar(graph, startResult.nodeId, goalId);
+      const elapsed = performance.now() - t0;
+
+      if (newRoute) {
+        setRerouteResult(newRoute);
+        const newInstrs = generateInstructions(newRoute, graph);
+        setInstructions(newInstrs);
+        setCurrentInstr(newInstrs[0] || null);
+
+        addLog(
+          netInfo.isOffline ? "🔴 Offline A* reroute (Corridor)" : "🔄 Local A* reroute",
+          elapsed
+        );
+
+        if (gpsRef.current) {
+          gpsRef.current.setRoute(newRoute.coords);
+          gpsRef.current.returnToRoute();
+          if (simRunning) gpsRef.current.start();
+        }
+      } else {
+        addLog("⚠️ No alternate route found", elapsed);
+      }
+    },
+    [routeResult, destPoint, netInfo.isOffline, netInfo.isOnline, simRunning]
+  );
 
 
-  // ── GPS position update handler ────────────────────────
+  // ── Unified GPS position update handler (Simulation + Real GPS) ────
   useEffect(() => {
-    if (!gpsRef.current) return;
-
     const activeRoute = rerouteResult || routeResult;
-    if (!activeRoute) return;
 
-    const unsub = gpsRef.current.onPositionUpdate((pos) => {
+    const handlePos = (pos) => {
       setVehiclePos(pos);
 
-      const offInfo = isOffRoute(activeRoute.coords, pos.lat, pos.lon, 50);
-      setOffRouteInfo(offInfo);
+      if (activeRoute) {
+        const offInfo = isOffRoute(activeRoute.coords, pos.lat, pos.lon, 50);
+        setOffRouteInfo(offInfo);
 
-      if (offInfo.offRoute && pos.strayed) {
-        reroute(pos.lat, pos.lon);
-      }
+        if (offInfo.offRoute && (pos.strayed || gpsMode === "real")) {
+          reroute(pos.lat, pos.lon);
+        }
 
-      if (instructions.length > 0) {
-        const nearest = findPositionOnRoute(activeRoute.coords, pos.lat, pos.lon);
-        const next = getNextInstruction(instructions, nearest.index, [pos.lat, pos.lon]);
-        setCurrentInstr(next);
-        const remDist = remainingDistance(activeRoute.coords, nearest.index);
-        setDistRemaining(remDist);
-        setEta(computeETA(remDist, pos.speed || 35));
+        if (instructions.length > 0) {
+          const nearest = findPositionOnRoute(activeRoute.coords, pos.lat, pos.lon);
+          const next = getNextInstruction(instructions, nearest.index, [pos.lat, pos.lon]);
+          setCurrentInstr(next);
+          const remDist = remainingDistance(activeRoute.coords, nearest.index);
+          setDistRemaining(remDist);
+          setEta(computeETA(remDist, pos.speed || 35));
+        }
       }
 
       if (pos.finished) {
         setSimRunning(false);
       }
-    });
+    };
 
-    return unsub;
-  }, [routeResult, rerouteResult, instructions, reroute]);
+    const unsubSim = gpsRef.current?.onPositionUpdate(handlePos);
+    const unsubReal = realGpsRef.current?.onPositionUpdate(handlePos);
+
+    return () => {
+      if (unsubSim) unsubSim();
+      if (unsubReal) unsubReal();
+    };
+  }, [routeResult, rerouteResult, instructions, reroute, gpsMode]);
+
+
+  // ── Real Mobile GPS & Tracking handlers ────────────────
+  async function handleToggleGpsMode(mode) {
+    setGpsMode(mode);
+    if (mode === "real") {
+      gpsRef.current?.pause();
+      setSimRunning(false);
+
+      try {
+        setLoadingMsg("Acquiring GPS satellite fix…");
+        const currentLoc = await realGpsRef.current.getCurrentLocation();
+        setStartPoint(currentLoc);
+        setMapViewCenter([currentLoc.lat, currentLoc.lon]);
+        setFollowVehicle(true);
+        realGpsRef.current.start();
+        addLog("🛰️ Real Device GPS tracking active", null);
+      } catch (err) {
+        alert("Location access required for Real GPS mode. Please allow location permissions in your browser.");
+        setGpsMode("simulation");
+      }
+    } else {
+      realGpsRef.current?.stop();
+      addLog("🚗 Switched to Simulation Mode", null);
+    }
+  }
+
+  async function handleUseCurrentLocation(pointType) {
+    try {
+      setLoading(true);
+      setLoadingMsg("Acquiring high-accuracy physical GPS location…");
+      const loc = await realGpsRef.current.getCurrentLocation();
+      loc.isCurrentGps = true;
+
+      // Automatically engage Real GPS tracking mode
+      setGpsMode("real");
+      gpsRef.current?.pause();
+      setSimRunning(false);
+      realGpsRef.current.start();
+
+      if (pointType === "start") {
+        setStartPoint(loc);
+        setVehiclePos({ ...loc, speed: loc.speed || 0, bearing: 0, isRealGps: true });
+        addLog("🛰️ Pickup set to your live GPS coordinates", null);
+      } else {
+        setDestPoint(loc);
+        addLog("🛰️ Destination set to your live GPS coordinates", null);
+      }
+      setMapViewCenter([loc.lat, loc.lon]);
+      setFollowVehicle(true);
+    } catch {
+      alert("Location access required. Please tap 'Allow' when your mobile browser prompts for GPS permissions.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
 
   // ── Online Reconnection & Present Location Sync ────────
@@ -698,6 +798,22 @@ function App() {
         </div>
 
         <div className="top-bar-right">
+          {/* Tracking Mode Switcher */}
+          <div className="gps-mode-switch">
+            <button
+              className={`mode-tab ${gpsMode === "simulation" ? "mode-tab--active" : ""}`}
+              onClick={() => handleToggleGpsMode("simulation")}
+            >
+              🎮 Sim Drive
+            </button>
+            <button
+              className={`mode-tab ${gpsMode === "real" ? "mode-tab--active" : ""}`}
+              onClick={() => handleToggleGpsMode("real")}
+            >
+              🛰️ Live GPS
+            </button>
+          </div>
+
           {vehiclePos && (
             <button
               className="btn btn--primary btn--sm"
@@ -912,38 +1028,70 @@ function App() {
             </div>
             <div className="panel-card-body">
 
-              {/* Start point row */}
-              <div className="route-point-row">
-                <div className="route-point-dot route-point-dot--start"></div>
-                <div className="route-point-info">
-                  {startPoint
-                    ? <span className="route-point-coords">{startPoint.lat.toFixed(4)}, {startPoint.lon.toFixed(4)}</span>
-                    : <span className="route-point-placeholder">Click to set start…</span>
-                  }
+              {/* Source / Pickup Location */}
+              <div className="route-picker-section">
+                <div className="route-picker-label">
+                  <span className="route-point-dot route-point-dot--start"></span>
+                  <strong>Pickup Location (Source):</strong>
                 </div>
-                <button
-                  className={`btn btn--sm ${pickingMode === "start" ? "btn--primary" : "btn--ghost"}`}
-                  onClick={() => setPickingMode(pickingMode === "start" ? null : "start")}
-                >
-                  {pickingMode === "start" ? "Picking…" : "Set"}
-                </button>
+
+                <div className="source-options-grid">
+                  <button
+                    className={`btn btn--sm ${startPoint?.isCurrentGps ? "btn--success" : "btn--primary"}`}
+                    onClick={() => handleUseCurrentLocation("start")}
+                    style={{ fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
+                  >
+                    📍 Current Location
+                  </button>
+                  <button
+                    className={`btn btn--sm ${pickingMode === "start" ? "btn--primary" : "btn--ghost"}`}
+                    onClick={() => setPickingMode(pickingMode === "start" ? null : "start")}
+                  >
+                    {pickingMode === "start" ? "👆 Tap Map…" : "🗺️ Set Location"}
+                  </button>
+                </div>
+
+                <div className="point-status-display">
+                  {startPoint ? (
+                    <span className="point-status-text point-status-text--active">
+                      {startPoint.isCurrentGps ? "🟢 Live Device GPS Active" : `📌 ${startPoint.lat.toFixed(4)}, ${startPoint.lon.toFixed(4)}`}
+                    </span>
+                  ) : (
+                    <span className="point-status-text point-status-text--muted">
+                      Tap 'Current Location' or 'Set Location'
+                    </span>
+                  )}
+                </div>
               </div>
 
-              {/* Destination point row */}
-              <div className="route-point-row">
-                <div className="route-point-dot route-point-dot--dest"></div>
-                <div className="route-point-info">
-                  {destPoint
-                    ? <span className="route-point-coords">{destPoint.lat.toFixed(4)}, {destPoint.lon.toFixed(4)}</span>
-                    : <span className="route-point-placeholder">Click to set destination…</span>
-                  }
+              {/* Destination Location */}
+              <div className="route-picker-section" style={{ marginTop: 8 }}>
+                <div className="route-picker-label">
+                  <span className="route-point-dot route-point-dot--dest"></span>
+                  <strong>Destination:</strong>
                 </div>
-                <button
-                  className={`btn btn--sm ${pickingMode === "destination" ? "btn--primary" : "btn--ghost"}`}
-                  onClick={() => setPickingMode(pickingMode === "destination" ? null : "destination")}
-                >
-                  {pickingMode === "destination" ? "Picking…" : "Set"}
-                </button>
+
+                <div className="source-options-grid">
+                  <button
+                    className={`btn btn--sm ${pickingMode === "destination" ? "btn--primary" : "btn--ghost"}`}
+                    onClick={() => setPickingMode(pickingMode === "destination" ? null : "destination")}
+                    style={{ gridColumn: "span 2" }}
+                  >
+                    {pickingMode === "destination" ? "👆 Tap Map to Drop Pin…" : "🗺️ Pick Destination on Map"}
+                  </button>
+                </div>
+
+                <div className="point-status-display">
+                  {destPoint ? (
+                    <span className="point-status-text point-status-text--active">
+                      🏁 ${destPoint.lat.toFixed(4)}, ${destPoint.lon.toFixed(4)}
+                    </span>
+                  ) : (
+                    <span className="point-status-text point-status-text--muted">
+                      Tap above or choose a Popular Route below
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Action buttons */}
@@ -962,6 +1110,22 @@ function App() {
                     ✕ Clear
                   </button>
                 )}
+              </div>
+
+              {/* Quick Presets (Local & Inter-City) */}
+              <div className="presets-container">
+                <span className="presets-title">Popular Routes:</span>
+                <div className="presets-grid">
+                  {ROUTE_PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      className="preset-btn"
+                      onClick={() => handleSelectPreset(p)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Route info */}
@@ -1081,63 +1245,99 @@ function App() {
         {/* ── Control Panel (top-right) ─────────────── */}
         <div className="control-panel">
 
-          {/* Simulation Controls */}
+          {/* Simulation & Real GPS Controls */}
           <div className="panel-card">
             <div
               className="panel-card-header"
               onClick={() => togglePanel("simulation")}
             >
-              <span className="panel-card-title">🎮 Simulation</span>
+              <span className="panel-card-title">
+                {gpsMode === "real" ? "🛰️ Live Hardware GPS" : "🎮 Drive Simulator"}
+              </span>
               <span className={`panel-card-toggle ${panelOpen.simulation ? "panel-card-toggle--open" : ""}`}>▾</span>
             </div>
 
             {panelOpen.simulation && (
               <div className="panel-card-body">
-                <div className="btn-group">
-                  <button
-                    className={`btn ${simRunning ? "btn--danger" : "btn--primary"}`}
-                    onClick={handleStartPause}
-                    disabled={!activeRoute}
-                  >
-                    {simRunning ? "⏸ Pause" : "▶ Start"}
-                  </button>
-                  <button className="btn btn--ghost" onClick={handleReset}>
-                    ↺ Reset
-                  </button>
-                </div>
+                {gpsMode === "real" ? (
+                  <div className="real-gps-panel">
+                    <div className="gps-live-badge">
+                      <span className="gps-live-dot"></span>
+                      <span>Real Device GPS Streaming</span>
+                    </div>
 
-                <div className="speed-control">
-                  <span className="speed-label">Speed</span>
-                  <input
-                    type="range" className="speed-slider"
-                    min="1" max="10" step="1"
-                    value={simSpeed} onChange={handleSpeedChange}
-                  />
-                  <span className="speed-value">{simSpeed}x</span>
-                </div>
+                    <div className="gps-metrics-grid">
+                      <div className="gps-metric-card">
+                        <span className="gps-metric-val">{vehiclePos ? `${vehiclePos.speed} km/h` : "0 km/h"}</span>
+                        <span className="gps-metric-lbl">Speed</span>
+                      </div>
+                      <div className="gps-metric-card">
+                        <span className="gps-metric-val">{vehiclePos?.accuracy ? `±${vehiclePos.accuracy}m` : "High"}</span>
+                        <span className="gps-metric-lbl">Accuracy</span>
+                      </div>
+                      <div className="gps-metric-card">
+                        <span className="gps-metric-val">{vehiclePos ? `${Math.round(vehiclePos.bearing)}°` : "0°"}</span>
+                        <span className="gps-metric-lbl">Heading</span>
+                      </div>
+                    </div>
 
-                <div className="btn-group">
-                  <button
-                    className="btn btn--danger btn--sm"
-                    onClick={handleStray} disabled={!simRunning}
-                  >
-                    ↗ Stray Off
-                  </button>
-                  <button
-                    className="btn btn--danger btn--sm"
-                    onClick={handleBlockRoad} disabled={!simRunning}
-                  >
-                    🚧 Block Road
-                  </button>
-                </div>
+                    <button
+                      className="btn btn--primary btn--sm"
+                      onClick={handleRecenterVehicle}
+                      style={{ width: "100%", marginTop: 8 }}
+                    >
+                      🎯 Center Map on Me
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="btn-group">
+                      <button
+                        className={`btn ${simRunning ? "btn--danger" : "btn--primary"}`}
+                        onClick={handleStartPause}
+                        disabled={!activeRoute}
+                      >
+                        {simRunning ? "⏸ Pause" : "▶ Start"}
+                      </button>
+                      <button className="btn btn--ghost" onClick={handleReset}>
+                        ↺ Reset
+                      </button>
+                    </div>
 
-                <button
-                  className="btn btn--ghost btn--sm"
-                  onClick={handleClearBlocks}
-                  style={{ width: "100%" }}
-                >
-                  ✅ Clear All Blocks
-                </button>
+                    <div className="speed-control">
+                      <span className="speed-label">Speed</span>
+                      <input
+                        type="range" className="speed-slider"
+                        min="1" max="10" step="1"
+                        value={simSpeed} onChange={handleSpeedChange}
+                      />
+                      <span className="speed-value">{simSpeed}x</span>
+                    </div>
+
+                    <div className="btn-group">
+                      <button
+                        className="btn btn--danger btn--sm"
+                        onClick={handleStray} disabled={!simRunning}
+                      >
+                        ↗ Stray Off
+                      </button>
+                      <button
+                        className="btn btn--danger btn--sm"
+                        onClick={handleBlockRoad} disabled={!simRunning}
+                      >
+                        🚧 Block Road
+                      </button>
+                    </div>
+
+                    <button
+                      className="btn btn--ghost btn--sm"
+                      onClick={handleClearBlocks}
+                      style={{ width: "100%" }}
+                    >
+                      ✅ Clear All Blocks
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>

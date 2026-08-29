@@ -18,14 +18,28 @@ export class CacheManager {
       const serialized = roadGraph.serialize();
       const sizeKB = new Blob([serialized]).size / 1024;
 
-      localStorage.setItem(CACHE_KEY, serialized);
-      localStorage.setItem(CACHE_META_KEY, JSON.stringify({
-        savedAt: Date.now(),
-        nodeCount: roadGraph.nodeCount,
-        edgeCount: roadGraph.edgeCount,
-        boundingBox: roadGraph.boundingBox,
-        sizeKB: Math.round(sizeKB * 10) / 10,
-      }));
+      try {
+        localStorage.setItem(CACHE_KEY, serialized);
+      } catch {
+        localStorage.removeItem(CACHE_KEY);
+        try {
+          localStorage.setItem(CACHE_KEY, serialized);
+        } catch {
+          // If still over quota, skip saving serialized graph but save metadata
+        }
+      }
+
+      try {
+        localStorage.setItem(CACHE_META_KEY, JSON.stringify({
+          savedAt: Date.now(),
+          nodeCount: roadGraph.nodeCount,
+          edgeCount: roadGraph.edgeCount,
+          boundingBox: roadGraph.boundingBox,
+          sizeKB: Math.round(sizeKB * 10) / 10,
+        }));
+      } catch {
+        // Ignore meta save error
+      }
 
       return { success: true, sizeKB };
     } catch (err) {

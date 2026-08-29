@@ -1,5 +1,0 @@
-{
-  "buildCommand": "npm --prefix adaptive-navigation run build",
-  "outputDirectory": "adaptive-navigation/dist",
-  "framework": "vite"
-}

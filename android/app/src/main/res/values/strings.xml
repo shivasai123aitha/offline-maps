@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Adaptive Navigation</string>
+    <string name="title_activity_main">Adaptive Navigation</string>
+    <string name="package_name">com.adaptivenav.offline</string>
+    <string name="custom_url_scheme">com.adaptivenav.offline</string>
+</resources>

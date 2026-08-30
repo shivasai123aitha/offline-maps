@@ -1,137 +1,115 @@
 /**
- * Smart Cache Manager
+ * Pure In-Memory Cache Manager (Zero Browser Disk Storage)
  *
- * Persists road graph data to localStorage with spatial metadata.
- * Supports corridor pre-fetching, cache inspection, and eviction.
+ * Keeps all corridor road graphs and navigation states strictly in
+ * volatile JavaScript RAM (0 KB localStorage footprint).
+ * Ensures complete privacy and zero device disk usage.
  */
 
 const CACHE_KEY = "adaptive_nav_graph_cache";
 const CACHE_META_KEY = "adaptive_nav_cache_meta";
-const MAX_CACHE_SIZE_MB = 10;
 
+// Volatile in-memory store (RAM only, 0 bytes disk storage)
+let memoryGraph = null;
+let memoryMeta = null;
+
+// Wipe any previous localStorage residue on startup
+try {
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem(CACHE_KEY);
+    localStorage.removeItem(CACHE_META_KEY);
+  }
+} catch {
+  // Ignore
+}
 
 export class CacheManager {
 
-  // ── Save graph to localStorage ─────────────────────────
+  // ── Save graph to volatile RAM (0 KB disk) ─────────────
   static save(roadGraph) {
     try {
-      const serialized = roadGraph.serialize();
-      const sizeKB = new Blob([serialized]).size / 1024;
+      if (!roadGraph) return { success: false };
 
-      try {
-        localStorage.setItem(CACHE_KEY, serialized);
-      } catch {
-        localStorage.removeItem(CACHE_KEY);
-        try {
-          localStorage.setItem(CACHE_KEY, serialized);
-        } catch {
-          // If still over quota, skip saving serialized graph but save metadata
-        }
-      }
+      memoryGraph = roadGraph.serialize ? JSON.parse(roadGraph.serialize()) : roadGraph;
+      memoryMeta = {
+        savedAt: Date.now(),
+        nodeCount: roadGraph.nodeCount || Object.keys(roadGraph.nodes || {}).length,
+        edgeCount: roadGraph.edgeCount || 0,
+        boundingBox: roadGraph.boundingBox || null,
+        storageType: "RAM (Volatile)",
+      };
 
-      try {
-        localStorage.setItem(CACHE_META_KEY, JSON.stringify({
-          savedAt: Date.now(),
-          nodeCount: roadGraph.nodeCount,
-          edgeCount: roadGraph.edgeCount,
-          boundingBox: roadGraph.boundingBox,
-          sizeKB: Math.round(sizeKB * 10) / 10,
-        }));
-      } catch {
-        // Ignore meta save error
-      }
-
-      return { success: true, sizeKB };
+      return { success: true, sizeKB: 0 };
     } catch (err) {
-      console.warn("Cache save failed:", err);
+      console.warn("In-memory cache save error:", err);
       return { success: false, error: err.message };
     }
   }
 
 
-  // ── Load graph from localStorage ──────────────────────
+  // ── Load graph from volatile RAM ───────────────────────
   static load() {
-    try {
-      const raw = localStorage.getItem(CACHE_KEY);
-      if (!raw) return null;
-
-      // Dynamic import to avoid circular deps
-      // We return raw JSON; caller constructs RoadGraph
-      return JSON.parse(raw);
-    } catch (err) {
-      console.warn("Cache load failed:", err);
-      return null;
-    }
+    return memoryGraph;
   }
 
 
-  // ── Get cache metadata ────────────────────────────────
+  // ── Get cache metadata ─────────────────────────────────
   static getMeta() {
+    return memoryMeta;
+  }
+
+
+  // ── Check if in-memory cache exists ────────────────────
+  static hasCachedData() {
+    return memoryGraph !== null;
+  }
+
+
+  // ── Clear in-memory cache and disk storage ─────────────
+  static clear() {
+    memoryGraph = null;
+    memoryMeta = null;
     try {
-      const raw = localStorage.getItem(CACHE_META_KEY);
-      if (!raw) return null;
-      return JSON.parse(raw);
+      if (typeof localStorage !== "undefined") {
+        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(CACHE_META_KEY);
+      }
     } catch {
-      return null;
+      // Ignore
     }
   }
 
 
-  // ── Check if cache exists ─────────────────────────────
-  static hasCachedData() {
-    return localStorage.getItem(CACHE_KEY) !== null;
-  }
-
-
-  // ── Clear cache ───────────────────────────────────────
-  static clear() {
-    localStorage.removeItem(CACHE_KEY);
-    localStorage.removeItem(CACHE_META_KEY);
-  }
-
-
-  // ── Cache size in KB ──────────────────────────────────
+  // ── Disk size is strictly 0 KB ─────────────────────────
   static getSizeKB() {
-    const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return 0;
-    return Math.round(new Blob([raw]).size / 1024 * 10) / 10;
+    return 0; // 0 KB disk storage
   }
 
 
-  // ── Check if cache is within size limits ──────────────
-  static isWithinLimits() {
-    return this.getSizeKB() < MAX_CACHE_SIZE_MB * 1024;
-  }
-
-
-  // ── Format cache info for display ─────────────────────
+  // ── Format cache info for display ──────────────────────
   static getDisplayInfo() {
     const meta = this.getMeta();
-    if (!meta) {
+    if (!meta || !memoryGraph) {
       return {
+        exists: false,
         status: "empty",
-        text: "No cached data",
+        text: "0 KB Disk (RAM Only)",
         nodes: 0,
         edges: 0,
         sizeKB: 0,
-        age: null,
+        storage: "RAM (0 KB Disk)",
       };
     }
 
-    const ageMs = Date.now() - meta.savedAt;
-    const ageMins = Math.floor(ageMs / 60000);
-    const ageText = ageMins < 1 ? "Just now"
-      : ageMins < 60 ? `${ageMins}m ago`
-      : `${Math.floor(ageMins / 60)}h ago`;
-
     return {
+      exists: true,
       status: "cached",
-      text: `${meta.nodeCount} nodes, ${meta.edgeCount} edges`,
+      text: `0 KB Disk — ${meta.nodeCount} nodes in RAM`,
       nodes: meta.nodeCount,
       edges: meta.edgeCount,
-      sizeKB: meta.sizeKB,
-      age: ageText,
-      boundingBox: meta.boundingBox,
+      sizeKB: 0,
+      storage: "RAM (0 KB Disk)",
+      meta,
     };
   }
 }

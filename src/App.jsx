@@ -129,7 +129,7 @@ function MapClickHandler({ onMapClick, pickingMode, onUserDrag }) {
 }
 
 
-// Initial fallback center (Neutral Global View before GPS locks in)
+// Initial fallback center
 const NEUTRAL_CENTER = [20.5937, 78.9629];
 const NEUTRAL_ZOOM = 5;
 
@@ -149,6 +149,7 @@ export default function App() {
   const [startPoint, setStartPoint] = useState(null);   // { lat, lon, isCurrentGps }
   const [destPoint, setDestPoint] = useState(null);      // { lat, lon }
   const [toastMsg, setToastMsg] = useState(null);
+  const [plannerExpanded, setPlannerExpanded] = useState(true);
 
   // ── Route state ─────────────────────────────────────────
   const [routeResult, setRouteResult] = useState(null);
@@ -173,15 +174,12 @@ export default function App() {
     color: "#10b981",
   });
 
-  // ── Cache state ────────────────────────────────────────
-  const [cacheInfo, setCacheInfo] = useState(CacheManager.getDisplayInfo());
-
   // ── UI state ───────────────────────────────────────────
   const [showGraphOverlay, setShowGraphOverlay] = useState(false);
   const [showSteps, setShowSteps] = useState(false);
   const [rerouteLog, setRerouteLog] = useState([]);
   const [panelOpen, setPanelOpen] = useState({
-    tracking: true,
+    tracking: false, // Collapsed by default on mobile for clean view
     cache: false,
     log: false,
   });
@@ -227,27 +225,17 @@ export default function App() {
   useEffect(() => {
     async function init() {
       setLoading(true);
-      setLoadingMsg("Acquiring your live GPS location…");
+      setLoadingMsg("Detecting your live location…");
 
-      // Init network monitor
       const monitor = new NetworkMonitor();
       netRef.current = monitor;
       setNetInfo(monitor.getInfo());
       monitor.onChange((info) => setNetInfo(info));
 
-      // Init GPS simulator & Real GPS Tracker
       const gps = new GPSSimulator();
       gpsRef.current = gps;
       const realGps = new RealGPSTracker();
       realGpsRef.current = realGps;
-
-      // Load cached graph if previously saved
-      const cached = CacheManager.load();
-      if (cached && cached.nodes && Object.keys(cached.nodes).length > 5) {
-        const restoredGraph = new RoadGraph(cached);
-        graphRef.current = restoredGraph;
-        setRoadGraph(restoredGraph);
-      }
 
       // Automatically query user's physical GPS location on startup
       try {
@@ -273,13 +261,11 @@ export default function App() {
         setMapViewZoom(15);
         setFollowVehicle(true);
 
-        // Start live continuous background GPS streaming
         realGps.start();
         setGpsMode("real");
-        addLog("🛰️ GPS Satellite Lock: Centered on your current location", null);
+        addLog("🛰️ GPS Lock: Centered on your current location", null);
       } catch (err) {
-        console.info("Location permission pending or not granted:", err.message);
-        addLog("📍 Tap 'Current Location' to center on your position", null);
+        console.info("Location access pending:", err.message);
       } finally {
         setLoading(false);
       }
@@ -307,11 +293,12 @@ export default function App() {
       setPickingMode(null);
       showToast("🏁 Destination set! Calculating route…");
       addLog("📌 Destination set on map", null);
+      setPlannerExpanded(false); // Auto-minimize planner for clean map view
     }
   }
 
 
-  // ── Sample Highway Presets (Optional Demonstrations) ────
+  // ── Sample Highway Presets ─────────────────────────────
   const SAMPLE_HIGHWAY_ROUTES = [
     {
       id: "hubballi_ballari",
@@ -340,7 +327,8 @@ export default function App() {
       (preset.start.lat + preset.dest.lat) / 2,
       (preset.start.lon + preset.dest.lon) / 2,
     ]);
-    showToast(`Loaded route: ${preset.label}`);
+    setPlannerExpanded(false);
+    showToast(`Loaded: ${preset.label}`);
   }
 
 
@@ -351,7 +339,7 @@ export default function App() {
     async function calculateRoute() {
       const t0 = performance.now();
 
-      // 1. If Online: High-speed Global OSRM Routing (unlimited distance, sub-100ms)
+      // 1. If Online: High-speed Global OSRM Routing
       if (netInfo.isOnline) {
         try {
           const globalResult = await fetchGlobalRoute(
@@ -363,17 +351,13 @@ export default function App() {
 
           const elapsed = performance.now() - t0;
 
-          // Build Smart Corridor Graph along this route for offline A* resilience
+          // Build in-memory corridor graph
           const corridorData = buildCorridorGraph(globalResult);
           const corridorGraph = new RoadGraph(corridorData);
           graphRef.current = corridorGraph;
           setRoadGraph(corridorGraph);
-
-          // Save corridor graph to cache
           CacheManager.save(corridorGraph);
-          setCacheInfo(CacheManager.getDisplayInfo());
 
-          // Set Route Result & GPS track
           if (gpsRef.current) {
             gpsRef.current.setRoute(globalResult.coords);
           }
@@ -387,7 +371,10 @@ export default function App() {
           setDistRemaining(globalResult.distance);
           setEta(globalResult.time);
 
-          // Fit map bounds to show full route
+          // Auto-collapse planner to reveal full map
+          setPlannerExpanded(false);
+
+          // Fit bounds
           let minLat = Infinity, maxLat = -Infinity;
           let minLon = Infinity, maxLon = -Infinity;
           for (let i = 0; i < globalResult.coords.length; i++) {
@@ -399,14 +386,14 @@ export default function App() {
           }
           setMapViewCenter([(minLat + maxLat) / 2, (minLon + maxLon) / 2]);
 
-          addLog(`🌐 Smart Route: ${globalResult.distance} km, ${globalResult.coords.length} pts (Corridor cached)`, elapsed);
+          addLog(`🌐 Route Loaded: ${globalResult.distance} km, ${globalResult.coords.length} pts`, elapsed);
           return;
         } catch (err) {
-          console.warn("Global routing failed, falling back to local road graph:", err);
+          console.warn("Global routing fallback:", err);
         }
       }
 
-      // 2. If Offline (or fallback): use local RoadGraph with A* pathfinding
+      // 2. If Offline: in-memory A* pathfinding
       const graph = graphRef.current;
       if (!graph) return;
 
@@ -414,7 +401,7 @@ export default function App() {
       const goalResult = findNearestNode(graph.nodes, destPoint.lat, destPoint.lon);
 
       if (!startResult.nodeId || !goalResult.nodeId) {
-        addLog("⚠️ Points outside cached road corridor (connect online for global routing)", null);
+        addLog("⚠️ Points outside cached corridor", null);
         return;
       }
 
@@ -435,9 +422,10 @@ export default function App() {
         setCurrentInstr(firstTurn || null);
         setDistRemaining(result.distance);
         setEta(computeETA(result.distance));
-        addLog(`📍 Offline A* Route: ${result.distance} km, ${result.path.length} nodes`, elapsed);
+        setPlannerExpanded(false);
+        addLog(`📍 Offline A* Route: ${result.distance} km`, elapsed);
       } else {
-        addLog("⚠️ No alternate path found in cached corridor", elapsed);
+        addLog("⚠️ No alternate path found in RAM corridor", elapsed);
       }
     }
 
@@ -458,6 +446,7 @@ export default function App() {
     }
 
     if (activeRoute) {
+      setPlannerExpanded(false);
       if (gpsMode === "simulation") {
         handleStartPauseSim();
       } else {
@@ -478,7 +467,6 @@ export default function App() {
 
       const t0 = performance.now();
 
-      // 1. If online: try high-speed OSRM reroute from present location to destination
       if (netInfo.isOnline) {
         try {
           const globalResult = await fetchGlobalRoute(lat, lon, destPoint.lat, destPoint.lon);
@@ -505,11 +493,10 @@ export default function App() {
           }
           return;
         } catch (err) {
-          console.warn("Online reroute fallback to local graph:", err);
+          console.warn("Online reroute fallback:", err);
         }
       }
 
-      // 2. Offline: use in-memory corridor/regional A*
       if (!graph) return;
       const startResult = findNearestNode(graph.nodes, lat, lon);
       const goalId = origRoute.path[origRoute.path.length - 1];
@@ -524,7 +511,7 @@ export default function App() {
         setCurrentInstr(newInstrs[0] || null);
 
         addLog(
-          netInfo.isOffline ? "🔴 Offline A* reroute (Corridor)" : "🔄 Local A* reroute",
+          netInfo.isOffline ? "🔴 Offline A* reroute (RAM)" : "🔄 Local A* reroute",
           elapsed
         );
 
@@ -541,7 +528,7 @@ export default function App() {
   );
 
 
-  // ── Unified GPS position update handler (Simulation + Real GPS) ────
+  // ── Unified GPS position update handler ────────────────
   useEffect(() => {
     const activeRoute = rerouteResult || routeResult;
 
@@ -610,7 +597,7 @@ export default function App() {
   async function handleUseCurrentLocation(pointType) {
     try {
       setLoading(true);
-      setLoadingMsg("Locking onto your physical GPS satellite position…");
+      setLoadingMsg("Locking onto your physical GPS location…");
       const loc = await realGpsRef.current.getCurrentLocation();
       loc.isCurrentGps = true;
 
@@ -622,11 +609,11 @@ export default function App() {
       if (pointType === "start") {
         setStartPoint(loc);
         setVehiclePos({ ...loc, speed: loc.speed || 0, bearing: 0, isRealGps: true });
-        showToast("📍 Pickup set to your live GPS location");
+        showToast("📍 Pickup set to your live GPS position");
         addLog("🛰️ Pickup set to your live GPS coordinates", null);
       } else {
         setDestPoint(loc);
-        showToast("🏁 Destination set to your live GPS location");
+        showToast("🏁 Destination set to your live GPS position");
         addLog("🛰️ Destination set to your live GPS coordinates", null);
       }
       setMapViewCenter([loc.lat, loc.lon]);
@@ -765,6 +752,7 @@ export default function App() {
     setCurrentInstr(null);
     setDistRemaining(0);
     setEta("--");
+    setPlannerExpanded(true);
     showToast("Route cleared");
   }
 
@@ -791,7 +779,7 @@ export default function App() {
   }, [showGraphOverlay, roadGraph]);
 
   const pickingLabel = pickingMode === "start"
-    ? "👆 Tap map to set PICKUP point"
+    ? "👆 Tap map to set PICKUP location"
     : pickingMode === "destination"
       ? "👆 Tap map to set DESTINATION"
       : null;
@@ -804,17 +792,12 @@ export default function App() {
   return (
     <div className="app">
 
-      {/* ── Top Floating Header ───────────────────────── */}
+      {/* ── Top Floating Header (Slim on Mobile) ─────── */}
       <header className="top-bar">
         <div className="top-bar-left">
           <div className="logo">
-            <div className="logo-icon-wrap">
-              <span className="logo-icon">🧭</span>
-            </div>
-            <div className="logo-text">
-              <span className="logo-title">Adaptive Nav</span>
-              <span className="logo-subtitle">Smart Hybrid GPS</span>
-            </div>
+            <span className="logo-icon">🧭</span>
+            <span className="logo-title">AdaptiveNav</span>
           </div>
         </div>
 
@@ -831,18 +814,18 @@ export default function App() {
               className={`mode-tab ${gpsMode === "simulation" ? "mode-tab--active" : ""}`}
               onClick={() => handleToggleGpsMode("simulation")}
             >
-              🎮 Sim Drive
+              🎮 Sim
             </button>
           </div>
 
-          {/* Network State Toggle Pill */}
+          {/* Network Toggle Pill */}
           <button
             className="net-status-btn"
             onClick={() => netRef.current?.toggleSimulation()}
             title="Click to toggle Online/Offline simulation"
           >
             <span className={`net-status-dot net-status-dot--${netInfo.state}`}></span>
-            <span className="net-status-label">{netInfo.isOffline ? "Offline (Corridor A*)" : "Online"}</span>
+            <span className="net-status-label">{netInfo.isOffline ? "Offline" : "Online"}</span>
           </button>
         </div>
       </header>
@@ -883,13 +866,13 @@ export default function App() {
           </div>
         )}
 
-        {/* Off-Route Dynamic Alert */}
+        {/* Off-Route Alert Banner */}
         {offRouteInfo?.offRoute && (
           <div className="offroute-alert">
             <span className="offroute-alert-icon">⚡</span>
             <div>
               <strong>Off Route Detected</strong>
-              <div style={{ fontSize: 11, opacity: 0.85 }}>
+              <div style={{ fontSize: 11, opacity: 0.9 }}>
                 Rerouting in {netInfo.isOffline ? "offline corridor A*" : "OSRM engine"}…
               </div>
             </div>
@@ -897,7 +880,7 @@ export default function App() {
         )}
 
 
-        {/* Interactive Map */}
+        {/* Interactive Map Canvas */}
         {!loading && (
           <MapContainer
             center={mapViewCenter}
@@ -935,7 +918,7 @@ export default function App() {
               />
             ))}
 
-            {/* Active Route Line */}
+            {/* Active Route Polyline */}
             {activeRoute && (
               <Polyline
                 positions={activeRoute.coords}
@@ -991,7 +974,7 @@ export default function App() {
               </Marker>
             )}
 
-            {/* Blocked Road Indicators */}
+            {/* Blocked road indicators */}
             {roadGraph && Array.from(roadGraph.blockedEdges).map((key) => {
               const [fromId] = key.split("-");
               const node = roadGraph.nodes[fromId];
@@ -1008,7 +991,7 @@ export default function App() {
                     weight: 2,
                   }}
                 >
-                  <Popup>🚧 Simulated Road Block</Popup>
+                  <Popup>🚧 Road Block</Popup>
                 </CircleMarker>
               );
             })}
@@ -1016,113 +999,142 @@ export default function App() {
         )}
 
 
-        {/* ── Route Planning Card (Floating Top-Left) ──── */}
+        {/* ── Route Planning Card (Collapsible for Uncluttered Mobile View) ──── */}
         <aside className="route-picker-panel">
-          <div className="glass-card">
-            <div className="glass-card-header">
-              <div className="glass-card-title-wrap">
-                <span className="glass-card-icon">📍</span>
-                <h2 className="glass-card-title">Route Planner</h2>
-              </div>
-              {startPoint && destPoint && (
-                <button
-                  className="btn-icon-subtle"
-                  onClick={handleSwapPoints}
-                  title="Swap Start and Destination"
-                >
-                  ⇄
-                </button>
-              )}
-            </div>
-
-            <div className="glass-card-body">
-              {/* Pickup Point Selection */}
-              <div className="route-input-group">
-                <div className="route-input-label">
-                  <span className="dot dot-pickup"></span>
-                  <span>Pickup / Source</span>
+          {!plannerExpanded && activeRoute ? (
+            /* Minimized Sleek Pill on Mobile when navigating */
+            <button
+              className="route-minimized-pill"
+              onClick={() => setPlannerExpanded(true)}
+            >
+              <span className="minimized-pill-dot"></span>
+              <span className="minimized-pill-title">
+                {destPoint ? "Navigating to Destination" : "Route Active"}
+              </span>
+              <span className="minimized-pill-dist">
+                {distRemaining >= 1 ? `${distRemaining.toFixed(1)} km` : `${Math.round(distRemaining * 1000)} m`}
+              </span>
+              <span className="minimized-pill-btn">Edit ▾</span>
+            </button>
+          ) : (
+            /* Full Planner Card */
+            <div className="glass-card">
+              <div className="glass-card-header">
+                <div className="glass-card-title-wrap">
+                  <span className="glass-card-icon">📍</span>
+                  <h2 className="glass-card-title">Route Planner</h2>
                 </div>
-                <div className="route-btn-grid">
-                  <button
-                    className={`btn ${startPoint?.isCurrentGps ? "btn--emerald" : "btn--glass"}`}
-                    onClick={() => handleUseCurrentLocation("start")}
-                  >
-                    📍 Current Location
-                  </button>
-                  <button
-                    className={`btn ${pickingMode === "start" ? "btn--primary" : "btn--glass"}`}
-                    onClick={() => setPickingMode(pickingMode === "start" ? null : "start")}
-                  >
-                    {pickingMode === "start" ? "👆 Tap Map…" : "🗺️ Set on Map"}
-                  </button>
-                </div>
-                {startPoint && (
-                  <div className="coord-chip">
-                    <span>{startPoint.isCurrentGps ? "🟢 Live GPS Locked" : `📌 ${startPoint.lat.toFixed(4)}, ${startPoint.lon.toFixed(4)}`}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Destination Point Selection */}
-              <div className="route-input-group" style={{ marginTop: 10 }}>
-                <div className="route-input-label">
-                  <span className="dot dot-dest"></span>
-                  <span>Destination</span>
-                </div>
-                <button
-                  className={`btn btn--full ${pickingMode === "destination" ? "btn--primary" : "btn--glass"}`}
-                  onClick={() => setPickingMode(pickingMode === "destination" ? null : "destination")}
-                >
-                  {pickingMode === "destination" ? "👆 Tap Destination on Map…" : "🗺️ Pick Destination on Map"}
-                </button>
-                {destPoint && (
-                  <div className="coord-chip">
-                    <span>🏁 {destPoint.lat.toFixed(4)}, {destPoint.lon.toFixed(4)}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Primary Action Button */}
-              <button
-                className={`btn btn--primary btn--hero btn--full ${activeRoute ? "btn--hero-active" : ""}`}
-                onClick={handleStartNavigationAction}
-                style={{ marginTop: 12 }}
-              >
-                {activeRoute ? (simRunning ? "⏸ Pause Navigation" : "🚀 Start Navigation") : "🧭 Calculate & Navigate"}
-              </button>
-
-              {/* Clear Route Button if Route Exists */}
-              {activeRoute && (
-                <button
-                  className="btn btn--glass btn--sm btn--full"
-                  onClick={handleClearRoute}
-                  style={{ marginTop: 6 }}
-                >
-                  ✕ Clear Route
-                </button>
-              )}
-
-              {/* Sample Highway Runs */}
-              <div className="sample-routes-section">
-                <span className="sample-routes-title">Sample Highway Runs:</span>
-                <div className="sample-routes-grid">
-                  {SAMPLE_HIGHWAY_ROUTES.map((p) => (
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {startPoint && destPoint && (
                     <button
-                      key={p.id}
-                      className="sample-route-chip"
-                      onClick={() => handleSelectSampleHighway(p)}
+                      className="btn-icon-subtle"
+                      onClick={handleSwapPoints}
+                      title="Swap Start and Destination"
                     >
-                      {p.label}
+                      ⇄
                     </button>
-                  ))}
+                  )}
+                  {activeRoute && (
+                    <button
+                      className="btn-icon-subtle"
+                      onClick={() => setPlannerExpanded(false)}
+                      title="Collapse to Map"
+                    >
+                      ▲
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="glass-card-body">
+                {/* Pickup Point Selection */}
+                <div className="route-input-group">
+                  <div className="route-input-label">
+                    <span className="dot dot-pickup"></span>
+                    <span>Pickup / Source</span>
+                  </div>
+                  <div className="route-btn-grid">
+                    <button
+                      className={`btn ${startPoint?.isCurrentGps ? "btn--emerald" : "btn--glass"}`}
+                      onClick={() => handleUseCurrentLocation("start")}
+                    >
+                      📍 My Location
+                    </button>
+                    <button
+                      className={`btn ${pickingMode === "start" ? "btn--primary" : "btn--glass"}`}
+                      onClick={() => setPickingMode(pickingMode === "start" ? null : "start")}
+                    >
+                      {pickingMode === "start" ? "👆 Tap Map…" : "🗺️ Set on Map"}
+                    </button>
+                  </div>
+                  {startPoint && (
+                    <div className="coord-chip">
+                      <span>{startPoint.isCurrentGps ? "🟢 Live GPS Locked" : `📌 ${startPoint.lat.toFixed(4)}, ${startPoint.lon.toFixed(4)}`}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Destination Point Selection */}
+                <div className="route-input-group" style={{ marginTop: 10 }}>
+                  <div className="route-input-label">
+                    <span className="dot dot-dest"></span>
+                    <span>Destination</span>
+                  </div>
+                  <button
+                    className={`btn btn--full ${pickingMode === "destination" ? "btn--primary" : "btn--glass"}`}
+                    onClick={() => setPickingMode(pickingMode === "destination" ? null : "destination")}
+                  >
+                    {pickingMode === "destination" ? "👆 Tap Map to Set Destination…" : "🗺️ Pick Destination on Map"}
+                  </button>
+                  {destPoint && (
+                    <div className="coord-chip">
+                      <span>🏁 ${destPoint.lat.toFixed(4)}, ${destPoint.lon.toFixed(4)}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Primary Action Button */}
+                <button
+                  className={`btn btn--primary btn--hero btn--full ${activeRoute ? "btn--hero-active" : ""}`}
+                  onClick={handleStartNavigationAction}
+                  style={{ marginTop: 12 }}
+                >
+                  {activeRoute ? (simRunning ? "⏸ Pause Navigation" : "🚀 Start Navigation") : "🧭 Calculate & Navigate"}
+                </button>
+
+                {/* Clear Route Button if Route Exists */}
+                {activeRoute && (
+                  <button
+                    className="btn btn--glass btn--sm btn--full"
+                    onClick={handleClearRoute}
+                    style={{ marginTop: 6 }}
+                  >
+                    ✕ Clear Route
+                  </button>
+                )}
+
+                {/* Sample Highway Runs */}
+                <div className="sample-routes-section">
+                  <span className="sample-routes-title">Sample Highway Runs:</span>
+                  <div className="sample-routes-grid">
+                    {SAMPLE_HIGHWAY_ROUTES.map((p) => (
+                      <button
+                        key={p.id}
+                        className="sample-route-chip"
+                        onClick={() => handleSelectSampleHighway(p)}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          )}
         </aside>
 
 
-        {/* ── Navigation HUD (Floating Bottom/Driving HUD) ──── */}
+        {/* ── Navigation HUD (Floating Bottom HUD) ──── */}
         {activeRoute && !loading && (
           <div className="nav-hud-floating">
             <div className="nav-hud-main">
@@ -1173,7 +1185,7 @@ export default function App() {
                 <span className={`status-pill status-pill--${netInfo.isOffline ? "offline" : "online"}`}>
                   {netInfo.isOffline ? "Offline A*" : "OSRM Fast"}
                 </span>
-                <span className="metric-lbl">Routing Mode</span>
+                <span className="metric-lbl">Mode</span>
               </div>
             </div>
 
@@ -1183,7 +1195,7 @@ export default function App() {
                 className="btn-text-toggle"
                 onClick={() => setShowSteps(!showSteps)}
               >
-                {showSteps ? "▲ Hide Turn-by-Turn List" : `▼ View ${instructions.length} Turn Directions`}
+                {showSteps ? "▲ Hide Turn Directions" : `▼ View ${instructions.length} Turns`}
               </button>
             </div>
 
@@ -1207,9 +1219,8 @@ export default function App() {
         )}
 
 
-        {/* ── Floating Map Action Buttons (Bottom Right FABs) ─ */}
+        {/* ── Floating Action Buttons (FABs) ────────────────── */}
         <div className="map-fabs-container">
-          {/* Recenter Button */}
           <button
             className="fab-btn"
             onClick={handleRecenterVehicle}
@@ -1218,7 +1229,6 @@ export default function App() {
             🎯
           </button>
 
-          {/* Quick Roadblock Simulation Button */}
           {activeRoute && (
             <button
               className="fab-btn fab-btn--danger"
@@ -1229,7 +1239,6 @@ export default function App() {
             </button>
           )}
 
-          {/* Offline/Online Quick Toggle */}
           <button
             className="fab-btn"
             onClick={() => netRef.current?.toggleSimulation()}
@@ -1240,10 +1249,8 @@ export default function App() {
         </div>
 
 
-        {/* ── Control / Debug Drawers (Top-Right) ────── */}
-        <aside className="control-panel">
-
-          {/* Drive & Hardware GPS Controller */}
+        {/* ── Control / Debug Drawer (Desktop only, never overlaps mobile) ── */}
+        <aside className="control-panel desktop-only">
           <div className="glass-card glass-card--sm">
             <div
               className="glass-card-header"
@@ -1333,80 +1340,6 @@ export default function App() {
                     </button>
                   </div>
                 )}
-              </div>
-            )}
-          </div>
-
-          {/* Offline Corridor Cache Inspector */}
-          <div className="glass-card glass-card--sm" style={{ marginTop: 8 }}>
-            <div className="glass-card-header" onClick={() => togglePanel("cache")}>
-              <div className="glass-card-title-wrap">
-                <span className="glass-card-icon">💾</span>
-                <h3 className="glass-card-title">Corridor Cache</h3>
-              </div>
-              <span className={`panel-toggle-arrow ${panelOpen.cache ? "open" : ""}`}>▾</span>
-            </div>
-
-            {panelOpen.cache && (
-              <div className="glass-card-body">
-                <div className="cache-info-list">
-                  <div className="cache-row">
-                    <span>Corridor Status:</span>
-                    <strong style={{ color: "#10b981" }}>{cacheInfo.exists ? "Cached in RAM" : "Empty"}</strong>
-                  </div>
-                  {cacheInfo.meta && (
-                    <>
-                      <div className="cache-row">
-                        <span>Road Nodes:</span>
-                        <strong>{cacheInfo.meta.nodeCount}</strong>
-                      </div>
-                      <div className="cache-row">
-                        <span>Memory Footprint:</span>
-                        <strong>{cacheInfo.meta.sizeKB} KB</strong>
-                      </div>
-                    </>
-                  )}
-                </div>
-
-                <div className="checkbox-wrap" style={{ marginTop: 8 }}>
-                  <label className="custom-checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={showGraphOverlay}
-                      onChange={(e) => setShowGraphOverlay(e.target.checked)}
-                    />
-                    <span>Show Corridor Graph Overlay</span>
-                  </label>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Live Reroute Latency Log */}
-          <div className="glass-card glass-card--sm" style={{ marginTop: 8 }}>
-            <div className="glass-card-header" onClick={() => togglePanel("log")}>
-              <div className="glass-card-title-wrap">
-                <span className="glass-card-icon">⚡</span>
-                <h3 className="glass-card-title">Activity Log ({rerouteLog.length})</h3>
-              </div>
-              <span className={`panel-toggle-arrow ${panelOpen.log ? "open" : ""}`}>▾</span>
-            </div>
-
-            {panelOpen.log && (
-              <div className="glass-card-body">
-                <div className="log-entries-scroll">
-                  {rerouteLog.length === 0 ? (
-                    <div className="log-empty">No activity yet</div>
-                  ) : (
-                    rerouteLog.map((item) => (
-                      <div key={item.id} className="log-entry-row">
-                        <span className="log-time">{item.time}</span>
-                        <span className="log-text">{item.text}</span>
-                        {item.latency && <span className="log-latency">{item.latency}</span>}
-                      </div>
-                    ))
-                  )}
-                </div>
               </div>
             )}
           </div>

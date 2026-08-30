@@ -1,11 +1,12 @@
 /**
- * Real Device GPS Tracker
+ * Real Device GPS Tracker (Native Capacitor Android + Web)
  * 
- * Connects directly to mobile phone GPS satellite hardware via
- * navigator.geolocation.watchPosition with 0ms maximumAge for instant
- * real-time movement tracking while walking or driving.
+ * Supports native Android GPS via @capacitor/geolocation
+ * with automatic fallback to standard browser geolocation.
  */
 
+import { Capacitor } from "@capacitor/core";
+import { Geolocation } from "@capacitor/geolocation";
 import { haversine, bearing } from "./osmService.js";
 
 export class RealGPSTracker {
@@ -17,10 +18,23 @@ export class RealGPSTracker {
   }
 
   static isSupported() {
-    return typeof navigator !== "undefined" && "geolocation" in navigator;
+    return Capacitor.isNativePlatform() || (typeof navigator !== "undefined" && "geolocation" in navigator);
   }
 
-  start() {
+  async requestPermission() {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        const status = await Geolocation.requestPermissions();
+        return status.location === "granted";
+      }
+      return true;
+    } catch (err) {
+      console.warn("Permission request error:", err);
+      return false;
+    }
+  }
+
+  async start() {
     if (!RealGPSTracker.isSupported()) {
       throw new Error("Geolocation is not supported by your device/browser.");
     }
@@ -28,66 +42,113 @@ export class RealGPSTracker {
     if (this.isActive) return;
     this.isActive = true;
 
+    // 1. Native Android App Implementation
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await this.requestPermission();
+        this.watchId = await Geolocation.watchPosition(
+          { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 },
+          (pos, err) => {
+            if (err || !pos) {
+              console.warn("Native GPS watch error:", err);
+              return;
+            }
+            this._processPosition(pos);
+          }
+        );
+        return;
+      } catch (err) {
+        console.warn("Native watchPosition failed, falling back to web API:", err);
+      }
+    }
+
+    // 2. Web Browser Implementation
     this.watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        const lat = pos.coords.latitude;
-        const lon = pos.coords.longitude;
-        const accuracy = Math.round(pos.coords.accuracy || 5);
-        let speedKmh = pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0;
-        let heading = pos.coords.heading;
-
-        if (this.lastPos) {
-          const dist = haversine(this.lastPos, { lat, lon });
-          if (heading === null || heading === undefined || isNaN(heading)) {
-            if (dist > 0.001) {
-              heading = bearing(this.lastPos, { lat, lon });
-            } else {
-              heading = this.lastPos.bearing || 0;
-            }
-          }
-        }
-
-        const data = {
-          lat,
-          lon,
-          accuracy,
-          speed: speedKmh,
-          bearing: heading || 0,
-          isRealGps: true,
-          strayed: false,
-          timestamp: pos.timestamp,
-        };
-
-        this.lastPos = data;
-        this._emit(data);
+        this._processPosition(pos);
       },
       (err) => {
-        console.warn("Real GPS hardware satellite error:", err.message);
+        console.warn("Web GPS satellite watch error:", err.message);
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 0,       // Zero maximumAge forces instant live satellite fix
+        maximumAge: 0,
         timeout: 10000,
       }
     );
   }
 
+  _processPosition(pos) {
+    const lat = pos.coords.latitude;
+    const lon = pos.coords.longitude;
+    const accuracy = Math.round(pos.coords.accuracy || 5);
+    let speedKmh = pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0;
+    let heading = pos.coords.heading;
+
+    if (this.lastPos) {
+      const dist = haversine(this.lastPos, { lat, lon });
+      if (heading === null || heading === undefined || isNaN(heading)) {
+        if (dist > 0.001) {
+          heading = bearing(this.lastPos, { lat, lon });
+        } else {
+          heading = this.lastPos.bearing || 0;
+        }
+      }
+    }
+
+    const data = {
+      lat,
+      lon,
+      accuracy,
+      speed: speedKmh,
+      bearing: heading || 0,
+      isRealGps: true,
+      strayed: false,
+      timestamp: pos.timestamp,
+    };
+
+    this.lastPos = data;
+    this._emit(data);
+  }
+
   stop() {
     if (this.watchId !== null) {
-      navigator.geolocation.clearWatch(this.watchId);
+      if (Capacitor.isNativePlatform() && typeof this.watchId === "string") {
+        Geolocation.clearWatch({ id: this.watchId });
+      } else if (typeof navigator !== "undefined" && "geolocation" in navigator) {
+        navigator.geolocation.clearWatch(this.watchId);
+      }
       this.watchId = null;
     }
     this.isActive = false;
   }
 
-  getCurrentLocation() {
-    return new Promise((resolve, reject) => {
-      if (!RealGPSTracker.isSupported()) {
-        reject(new Error("Geolocation not supported on this device."));
-        return;
-      }
+  async getCurrentLocation() {
+    if (!RealGPSTracker.isSupported()) {
+      throw new Error("Geolocation not supported on this device.");
+    }
 
-      // 1. First attempt: High-accuracy hardware GPS
+    // 1. If Native Android App: Use Capacitor Native Geolocation
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await this.requestPermission();
+        const pos = await Geolocation.getCurrentPosition({
+          enableHighAccuracy: true,
+          timeout: 10000,
+        });
+        return {
+          lat: pos.coords.latitude,
+          lon: pos.coords.longitude,
+          accuracy: Math.round(pos.coords.accuracy || 5),
+          speed: pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
+        };
+      } catch (nativeErr) {
+        console.warn("Capacitor native location error:", nativeErr);
+      }
+    }
+
+    // 2. Web Browser Implementation (with high-accuracy + coarse fallback)
+    return new Promise((resolve, reject) => {
       navigator.geolocation.getCurrentPosition(
         (pos) => resolve({
           lat: pos.coords.latitude,
@@ -96,8 +157,7 @@ export class RealGPSTracker {
           speed: pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
         }),
         (err) => {
-          // 2. Fallback attempt: Network/Cellular location (works instantly indoors)
-          console.warn("GPS satellite fix slow or denied, trying network fallback…", err.message);
+          console.warn("High accuracy GPS slow/denied, trying network fallback…", err.message);
           navigator.geolocation.getCurrentPosition(
             (pos2) => resolve({
               lat: pos2.coords.latitude,
@@ -117,13 +177,13 @@ export class RealGPSTracker {
   onPositionUpdate(callback) {
     this.callbacks.push(callback);
     return () => {
-      this.callbacks = this.callbacks.filter(cb => cb !== callback);
+      this.callbacks = this.callbacks.filter((cb) => cb !== callback);
     };
   }
 
-  _emit(data) {
+  _emit(pos) {
     for (const cb of this.callbacks) {
-      cb(data);
+      cb(pos);
     }
   }
 

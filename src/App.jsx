@@ -80,25 +80,26 @@ function createVehicleIcon(strayed, heading = 0) {
 
 
 // ── Map view controller ──────────────────────────────────
-function MapViewController({ center, zoom, vehiclePos, followVehicle }) {
+function MapViewController({ center, zoom, vehiclePos, followVehicle, isNavigating }) {
   const map = useMap();
   const initialSet = useRef(false);
 
   useEffect(() => {
-    if (vehiclePos && followVehicle) {
+    // Only auto-pan if user is actively driving AND followVehicle is enabled
+    if (isNavigating && vehiclePos && followVehicle) {
       map.panTo([vehiclePos.lat, vehiclePos.lon], { animate: true, duration: 0.4 });
-    } else if (center) {
-      map.setView(center, zoom || map.getZoom(), { animate: initialSet.current });
+    } else if (center && !initialSet.current) {
+      map.setView(center, zoom || map.getZoom(), { animate: false });
       initialSet.current = true;
     }
-  }, [center, zoom, vehiclePos, followVehicle, map]);
+  }, [center, zoom, vehiclePos, followVehicle, isNavigating, map]);
 
   return null;
 }
 
 
-// ── Map click / drag handler ─────────────────────────────
-function MapClickHandler({ onMapClick, pickingMode, onUserDrag }) {
+// ── Map interaction handler ──────────────────────────────
+function MapClickHandler({ onMapClick, pickingMode, onUserInteract }) {
   useMapEvents({
     click(e) {
       if (onMapClick) {
@@ -106,7 +107,13 @@ function MapClickHandler({ onMapClick, pickingMode, onUserDrag }) {
       }
     },
     dragstart() {
-      if (onUserDrag) onUserDrag();
+      if (onUserInteract) onUserInteract();
+    },
+    zoomstart() {
+      if (onUserInteract) onUserInteract();
+    },
+    movestart() {
+      if (onUserInteract) onUserInteract();
     },
   });
 
@@ -231,7 +238,7 @@ export default function App() {
 
         setMapViewCenter([userLoc.lat, userLoc.lon]);
         setMapViewZoom(15);
-        setFollowVehicle(true);
+        setFollowVehicle(false);
 
         realGps.start();
         setGpsMode("real");
@@ -746,11 +753,12 @@ export default function App() {
               zoom={mapViewZoom}
               vehiclePos={vehiclePos}
               followVehicle={followVehicle}
+              isNavigating={isNavigating}
             />
             <MapClickHandler
               onMapClick={handleMapClick}
               pickingMode={pickingMode}
-              onUserDrag={() => setFollowVehicle(false)}
+              onUserInteract={() => setFollowVehicle(false)}
             />
 
             {/* Active Route Polyline */}

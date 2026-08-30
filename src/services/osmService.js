@@ -131,6 +131,20 @@ export async function fetchGlobalRoute(startLat, startLon, destLat, destLon) {
         }
       }
 
+      // Find exact coordinate index in the route polyline array
+      let closestCoordIdx = 0;
+      let minD = Infinity;
+      for (let c = 0; c < coords.length; c++) {
+        const d = haversine(
+          { lat: stepCoord[0], lon: stepCoord[1] },
+          { lat: coords[c][0], lon: coords[c][1] }
+        );
+        if (d < minD) {
+          minD = d;
+          closestCoordIdx = c;
+        }
+      }
+
       instructions.push({
         maneuver: step.maneuver.type || "turn",
         icon,
@@ -138,7 +152,7 @@ export async function fetchGlobalRoute(startLat, startLon, destLat, destLon) {
         streetName,
         distanceM: Math.round(step.distance),
         coord: stepCoord,
-        pathIndex: Math.min(i, coords.length - 1),
+        pathIndex: closestCoordIdx,
       });
 
       accumulatedDist += step.distance;

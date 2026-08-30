@@ -222,33 +222,71 @@ export function isOffRoute(routeCoords, lat, lon, thresholdMeters = 50) {
 export function getNextInstruction(instructions, currentPathIndex, currentCoord = null) {
   if (!instructions || instructions.length === 0) return null;
 
+  // 1. Look for next upcoming intermediate maneuver/turn
   for (let i = 0; i < instructions.length; i++) {
     const instr = instructions[i];
-    if (instr.pathIndex > currentPathIndex) {
+    if (instr.maneuver === "arrive") continue;
+
+    // Check if this turn is ahead of our current index
+    if (instr.pathIndex >= currentPathIndex) {
       if (currentCoord && instr.coord) {
-        const liveDistM = Math.round(haversine(
-          { lat: currentCoord[0], lon: currentCoord[1] },
-          { lat: instr.coord[0], lon: instr.coord[1] }
-        ) * 1000);
-        return {
-          ...instr,
-          distanceM: liveDistM,
-        };
+        const liveDistM = Math.round(
+          haversine(
+            { lat: currentCoord[0], lon: currentCoord[1] },
+            { lat: instr.coord[0], lon: instr.coord[1] }
+          ) * 1000
+        );
+
+        // If we are still approaching this turn (> 15m away)
+        if (liveDistM > 15) {
+          let textWithDistance = instr.text;
+          if (liveDistM > 1000) {
+            textWithDistance = `In ${(liveDistM / 1000).toFixed(1)} km, ${instr.text}`;
+          } else if (liveDistM > 35) {
+            textWithDistance = `In ${liveDistM} m, ${instr.text}`;
+          }
+
+          return {
+            ...instr,
+            text: textWithDistance,
+            distanceM: liveDistM,
+          };
+        }
+      } else {
+        return instr;
       }
-      return instr;
     }
   }
 
-  // If at or past all turns, return arrival instruction
+  // 2. If all intermediate turns are passed, we are on the final stretch to destination
   const last = instructions[instructions.length - 1];
   if (last && currentCoord && last.coord) {
-    const liveDistM = Math.round(haversine(
-      { lat: currentCoord[0], lon: currentCoord[1] },
-      { lat: last.coord[0], lon: last.coord[1] }
-    ) * 1000);
+    const destDistM = Math.round(
+      haversine(
+        { lat: currentCoord[0], lon: currentCoord[1] },
+        { lat: last.coord[0], lon: last.coord[1] }
+      ) * 1000
+    );
+
+    // Only declare arrival if physically within 35 meters
+    if (destDistM <= 35) {
+      return {
+        maneuver: "arrive",
+        icon: "🏁",
+        text: "You have arrived at your destination",
+        streetName: last.streetName || "Destination",
+        distanceM: 0,
+      };
+    }
+
     return {
-      ...last,
-      distanceM: liveDistM,
+      maneuver: "straight",
+      icon: "⬆️",
+      text: destDistM > 1000
+        ? `Continue ${(destDistM / 1000).toFixed(1)} km to destination`
+        : `Continue ${destDistM} m to destination`,
+      streetName: last.streetName || "Destination",
+      distanceM: destDistM,
     };
   }
 

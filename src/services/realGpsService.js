@@ -86,6 +86,8 @@ export class RealGPSTracker {
         reject(new Error("Geolocation not supported on this device."));
         return;
       }
+
+      // 1. First attempt: High-accuracy hardware GPS
       navigator.geolocation.getCurrentPosition(
         (pos) => resolve({
           lat: pos.coords.latitude,
@@ -93,8 +95,21 @@ export class RealGPSTracker {
           accuracy: Math.round(pos.coords.accuracy || 5),
           speed: pos.coords.speed ? Math.round(pos.coords.speed * 3.6) : 0,
         }),
-        (err) => reject(err),
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+        (err) => {
+          // 2. Fallback attempt: Network/Cellular location (works instantly indoors)
+          console.warn("GPS satellite fix slow or denied, trying network fallback…", err.message);
+          navigator.geolocation.getCurrentPosition(
+            (pos2) => resolve({
+              lat: pos2.coords.latitude,
+              lon: pos2.coords.longitude,
+              accuracy: Math.round(pos2.coords.accuracy || 25),
+              speed: 0,
+            }),
+            (err2) => reject(err2),
+            { enableHighAccuracy: false, maximumAge: 60000, timeout: 15000 }
+          );
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
       );
     });
   }

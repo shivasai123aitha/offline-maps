@@ -551,6 +551,7 @@ export default function App() {
 
   async function handleUseCurrentLocation() {
     try {
+      showToast("📡 Connecting to GPS satellites…");
       const loc = await realGpsRef.current.getCurrentLocation();
       loc.isCurrentGps = true;
       setStartPoint(loc);
@@ -558,9 +559,12 @@ export default function App() {
       setMapViewCenter([loc.lat, loc.lon]);
       setMapViewZoom(16);
       setFollowVehicle(true);
+      realGpsRef.current.start();
+      setGpsMode("real");
       showToast("📍 Locked to current location");
     } catch {
-      showToast("⚠️ Location permission required");
+      showToast("👆 Tap anywhere on map to set Pickup point");
+      setPickingMode("start");
     }
   }
 

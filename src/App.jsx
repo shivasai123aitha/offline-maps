@@ -45,40 +45,36 @@ L.Icon.Default.mergeOptions({
 });
 
 
-// ── Custom marker icons ──────────────────────────────────
+// ── Google Maps Style Marker Icons ───────────────────────
 const startIcon = L.divIcon({
   className: "",
-  html: `<div class="custom-marker marker-start">
-    <span>A</span>
-    <div class="marker-shadow"></div>
+  html: `<div class="gmap-pin gmap-pin--start">
+    <div class="gmap-pin-circle"></div>
   </div>`,
-  iconSize: [36, 36],
-  iconAnchor: [18, 18],
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
 });
 
 const destIcon = L.divIcon({
   className: "",
-  html: `<div class="custom-marker marker-dest">
-    <span>B</span>
-    <div class="marker-shadow"></div>
+  html: `<div class="gmap-pin gmap-pin--dest">
+    <div class="gmap-dest-flag">🏁</div>
   </div>`,
-  iconSize: [36, 36],
-  iconAnchor: [18, 18],
+  iconSize: [32, 32],
+  iconAnchor: [16, 30],
 });
 
 function createVehicleIcon(strayed, heading = 0) {
   return L.divIcon({
     className: "",
     html: `
-      <div class="vehicle-beacon-container" style="transform: rotate(${heading}deg);">
-        <div class="vehicle-pulse-ring"></div>
-        <div class="vehicle-core ${strayed ? "vehicle-core--strayed" : ""}">
-          <div class="vehicle-heading-arrow"></div>
-        </div>
+      <div class="gmap-vehicle-beacon" style="transform: rotate(${heading}deg);">
+        <div class="gmap-radar-ring"></div>
+        <div class="gmap-nav-chevron ${strayed ? "gmap-nav-chevron--strayed" : ""}"></div>
       </div>
     `,
-    iconSize: [32, 32],
-    iconAnchor: [16, 16],
+    iconSize: [36, 36],
+    iconAnchor: [18, 18],
   });
 }
 
@@ -105,7 +101,7 @@ function MapViewController({ center, zoom, vehiclePos, followVehicle }) {
 function MapClickHandler({ onMapClick, pickingMode, onUserDrag }) {
   useMapEvents({
     click(e) {
-      if (pickingMode && onMapClick) {
+      if (onMapClick) {
         onMapClick(e.latlng.lat, e.latlng.lng);
       }
     },
@@ -135,7 +131,7 @@ const NEUTRAL_ZOOM = 5;
 
 
 // ══════════════════════════════════════════════════════════
-//  MAIN APP
+//  MAIN APP (Google Maps UI)
 // ══════════════════════════════════════════════════════════
 
 export default function App() {
@@ -144,12 +140,16 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loadingMsg, setLoadingMsg] = useState("Acquiring GPS location…");
 
-  // ── Location picking state ─────────────────────────────
-  const [pickingMode, setPickingMode] = useState(null); // null | "start" | "destination"
+  // ── Locations ───────────────────────────────────────────
   const [startPoint, setStartPoint] = useState(null);   // { lat, lon, isCurrentGps }
   const [destPoint, setDestPoint] = useState(null);      // { lat, lon }
+  const [pickingMode, setPickingMode] = useState(null); // null | "start" | "destination"
   const [toastMsg, setToastMsg] = useState(null);
-  const [plannerExpanded, setPlannerExpanded] = useState(true);
+
+  // ── Navigation UI mode: "explore" | "planning" | "navigating" ───
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [showBottomDrawer, setShowBottomDrawer] = useState(true);
+  const [showTurnList, setShowTurnList] = useState(false);
 
   // ── Route state ─────────────────────────────────────────
   const [routeResult, setRouteResult] = useState(null);
@@ -174,15 +174,6 @@ export default function App() {
     color: "#10b981",
   });
 
-  // ── UI state ───────────────────────────────────────────
-  const [showGraphOverlay, setShowGraphOverlay] = useState(false);
-  const [showSteps, setShowSteps] = useState(false);
-  const [rerouteLog, setRerouteLog] = useState([]);
-  const [panelOpen, setPanelOpen] = useState({
-    tracking: false, // Collapsed by default on mobile for clean view
-    cache: false,
-    log: false,
-  });
   const [mapViewCenter, setMapViewCenter] = useState(NEUTRAL_CENTER);
   const [mapViewZoom, setMapViewZoom] = useState(NEUTRAL_ZOOM);
   const [followVehicle, setFollowVehicle] = useState(true);
@@ -199,25 +190,6 @@ export default function App() {
   function showToast(text, duration = 3000) {
     setToastMsg(text);
     setTimeout(() => setToastMsg(null), duration);
-  }
-
-  // ── Reroute log helper ─────────────────────────────────
-  function addLog(text, latencyMs) {
-    const now = new Date();
-    const time = now.toLocaleTimeString("en-US", {
-      hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
-    });
-    setRerouteLog((prev) => [
-      {
-        id: Date.now(),
-        time,
-        text,
-        latency: latencyMs !== null && latencyMs !== undefined
-          ? `${latencyMs.toFixed(1)}ms`
-          : null,
-      },
-      ...prev.slice(0, 19),
-    ]);
   }
 
 
@@ -237,7 +209,7 @@ export default function App() {
       const realGps = new RealGPSTracker();
       realGpsRef.current = realGps;
 
-      // Automatically query user's physical GPS location on startup
+      // Auto-query user's live physical GPS location on launch
       try {
         const userLoc = await realGps.getCurrentLocation();
         const userPoint = {
@@ -263,9 +235,8 @@ export default function App() {
 
         realGps.start();
         setGpsMode("real");
-        addLog("🛰️ GPS Lock: Centered on your current location", null);
       } catch (err) {
-        console.info("Location access pending:", err.message);
+        console.info("Location permission pending:", err.message);
       } finally {
         setLoading(false);
       }
@@ -281,19 +252,18 @@ export default function App() {
   }, []);
 
 
-  // ── Map click handler ──────────────────────────────────
+  // ── Map click handler (Direct 1-tap Google Maps destination picking) ─
   function handleMapClick(lat, lon) {
     if (pickingMode === "start") {
       setStartPoint({ lat, lon, isCurrentGps: false });
-      setPickingMode("destination");
-      showToast("📍 Pickup set! Now tap destination point.");
-      addLog("📌 Pickup point set on map", null);
-    } else if (pickingMode === "destination") {
+      setPickingMode(null);
+      showToast("📍 Start point updated");
+    } else {
+      // Default: 1-tap on map sets Destination!
       setDestPoint({ lat, lon });
       setPickingMode(null);
+      setShowBottomDrawer(true);
       showToast("🏁 Destination set! Calculating route…");
-      addLog("📌 Destination set on map", null);
-      setPlannerExpanded(false); // Auto-minimize planner for clean map view
     }
   }
 
@@ -302,19 +272,19 @@ export default function App() {
   const SAMPLE_HIGHWAY_ROUTES = [
     {
       id: "hubballi_ballari",
-      label: "🛣️ Hubballi → Ballari (150 km)",
+      label: "Hubballi → Ballari (150 km)",
       start: { lat: 15.3647, lon: 75.1240 },
       dest: { lat: 15.1394, lon: 76.9214 },
     },
     {
       id: "hyderabad_vijayawada",
-      label: "🚀 Hyderabad → Vijayawada (275 km)",
+      label: "Hyderabad → Vijayawada (275 km)",
       start: { lat: 17.3850, lon: 78.4867 },
       dest: { lat: 16.5062, lon: 80.6480 },
     },
     {
       id: "bengaluru_tirupati",
-      label: "🌲 Bengaluru → Tirupati (250 km)",
+      label: "Bengaluru → Tirupati (250 km)",
       start: { lat: 12.9716, lon: 77.5946 },
       dest: { lat: 13.6288, lon: 79.4192 },
     },
@@ -327,12 +297,12 @@ export default function App() {
       (preset.start.lat + preset.dest.lat) / 2,
       (preset.start.lon + preset.dest.lon) / 2,
     ]);
-    setPlannerExpanded(false);
+    setShowBottomDrawer(true);
     showToast(`Loaded: ${preset.label}`);
   }
 
 
-  // ── Compute route when Start and Dest are ready ─────────
+  // ── Compute route when Start and Dest are set ───────────
   useEffect(() => {
     if (!startPoint || !destPoint) return;
 
@@ -349,9 +319,7 @@ export default function App() {
             destPoint.lon
           );
 
-          const elapsed = performance.now() - t0;
-
-          // Build in-memory corridor graph
+          // Build in-memory corridor graph for offline failover
           const corridorData = buildCorridorGraph(globalResult);
           const corridorGraph = new RoadGraph(corridorData);
           graphRef.current = corridorGraph;
@@ -371,10 +339,7 @@ export default function App() {
           setDistRemaining(globalResult.distance);
           setEta(globalResult.time);
 
-          // Auto-collapse planner to reveal full map
-          setPlannerExpanded(false);
-
-          // Fit bounds
+          // Fit bounds smoothly
           let minLat = Infinity, maxLat = -Infinity;
           let minLon = Infinity, maxLon = -Infinity;
           for (let i = 0; i < globalResult.coords.length; i++) {
@@ -385,15 +350,13 @@ export default function App() {
             if (cLon > maxLon) maxLon = cLon;
           }
           setMapViewCenter([(minLat + maxLat) / 2, (minLon + maxLon) / 2]);
-
-          addLog(`🌐 Route Loaded: ${globalResult.distance} km, ${globalResult.coords.length} pts`, elapsed);
           return;
         } catch (err) {
           console.warn("Global routing fallback:", err);
         }
       }
 
-      // 2. If Offline: in-memory A* pathfinding
+      // 2. If Offline: In-memory A*
       const graph = graphRef.current;
       if (!graph) return;
 
@@ -401,12 +364,11 @@ export default function App() {
       const goalResult = findNearestNode(graph.nodes, destPoint.lat, destPoint.lon);
 
       if (!startResult.nodeId || !goalResult.nodeId) {
-        addLog("⚠️ Points outside cached corridor", null);
+        showToast("⚠️ Points outside cached corridor");
         return;
       }
 
       const result = aStar(graph, startResult.nodeId, goalResult.nodeId);
-      const elapsed = performance.now() - t0;
 
       if (result) {
         if (gpsRef.current) {
@@ -422,10 +384,6 @@ export default function App() {
         setCurrentInstr(firstTurn || null);
         setDistRemaining(result.distance);
         setEta(computeETA(result.distance));
-        setPlannerExpanded(false);
-        addLog(`📍 Offline A* Route: ${result.distance} km`, elapsed);
-      } else {
-        addLog("⚠️ No alternate path found in RAM corridor", elapsed);
       }
     }
 
@@ -433,28 +391,42 @@ export default function App() {
   }, [startPoint, destPoint]);
 
 
-  // ── Primary Action: Calculate / Start Navigation ────────
-  async function handleStartNavigationAction() {
-    if (!startPoint) {
-      await handleUseCurrentLocation("start");
-    }
-
+  // ── Start Turn-by-Turn Navigation (Google Maps Style) ───
+  function handleStartNavigation() {
     if (!destPoint) {
-      setPickingMode("destination");
-      showToast("👆 Tap anywhere on the map to set your Destination");
+      showToast("👆 Tap anywhere on the map to set a Destination");
       return;
     }
 
-    if (activeRoute) {
-      setPlannerExpanded(false);
-      if (gpsMode === "simulation") {
-        handleStartPauseSim();
-      } else {
-        setFollowVehicle(true);
-        if (vehiclePos) setMapViewCenter([vehiclePos.lat, vehiclePos.lon]);
-        showToast("🛰️ Navigating with live GPS");
-      }
+    setIsNavigating(true);
+    setShowBottomDrawer(false);
+    setFollowVehicle(true);
+
+    if (vehiclePos) {
+      setMapViewCenter([vehiclePos.lat, vehiclePos.lon]);
+      setMapViewZoom(17);
     }
+
+    if (gpsMode === "simulation") {
+      const gps = gpsRef.current;
+      const activeRoute = rerouteResult || routeResult;
+      if (gps && activeRoute) {
+        gps.setRoute(activeRoute.coords);
+        gps.start();
+        setSimRunning(true);
+      }
+    } else {
+      realGpsRef.current?.start();
+      showToast("🛰️ Navigating with live GPS");
+    }
+  }
+
+  function handleExitNavigation() {
+    setIsNavigating(false);
+    if (gpsRef.current) gpsRef.current.pause();
+    setSimRunning(false);
+    setShowBottomDrawer(true);
+    showToast("Navigation ended");
   }
 
 
@@ -465,13 +437,9 @@ export default function App() {
       const origRoute = routeResult;
       if (!origRoute || !destPoint) return;
 
-      const t0 = performance.now();
-
       if (netInfo.isOnline) {
         try {
           const globalResult = await fetchGlobalRoute(lat, lon, destPoint.lat, destPoint.lon);
-          const elapsed = performance.now() - t0;
-
           const corridorData = buildCorridorGraph(globalResult);
           const corridorGraph = new RoadGraph(corridorData);
           graphRef.current = corridorGraph;
@@ -483,8 +451,6 @@ export default function App() {
           setCurrentInstr(firstTurn || null);
           setDistRemaining(globalResult.distance);
           setEta(globalResult.time);
-
-          addLog(`🌐 Online Reroute: ${globalResult.distance} km`, elapsed);
 
           if (gpsRef.current) {
             gpsRef.current.setRoute(globalResult.coords);
@@ -500,9 +466,7 @@ export default function App() {
       if (!graph) return;
       const startResult = findNearestNode(graph.nodes, lat, lon);
       const goalId = origRoute.path[origRoute.path.length - 1];
-
       const newRoute = aStar(graph, startResult.nodeId, goalId);
-      const elapsed = performance.now() - t0;
 
       if (newRoute) {
         setRerouteResult(newRoute);
@@ -510,21 +474,14 @@ export default function App() {
         setInstructions(newInstrs);
         setCurrentInstr(newInstrs[0] || null);
 
-        addLog(
-          netInfo.isOffline ? "🔴 Offline A* reroute (RAM)" : "🔄 Local A* reroute",
-          elapsed
-        );
-
         if (gpsRef.current) {
           gpsRef.current.setRoute(newRoute.coords);
           gpsRef.current.returnToRoute();
           if (simRunning) gpsRef.current.start();
         }
-      } else {
-        addLog("⚠️ No alternate route found", elapsed);
       }
     },
-    [routeResult, destPoint, netInfo.isOffline, netInfo.isOnline, simRunning]
+    [routeResult, destPoint, netInfo.isOnline, simRunning]
   );
 
 
@@ -582,128 +539,42 @@ export default function App() {
         setFollowVehicle(true);
         realGpsRef.current.start();
         showToast("🛰️ Connected to Live Device GPS");
-        addLog("🛰️ Real Device GPS tracking active", null);
-      } catch (err) {
-        showToast("⚠️ Location access required for Live GPS mode");
+      } catch {
+        showToast("⚠️ Location access required");
         setGpsMode("simulation");
       }
     } else {
       realGpsRef.current?.stop();
       showToast("🚗 Switched to Drive Simulator");
-      addLog("🚗 Switched to Drive Simulator", null);
     }
   }
 
-  async function handleUseCurrentLocation(pointType) {
+  async function handleUseCurrentLocation() {
     try {
-      setLoading(true);
-      setLoadingMsg("Locking onto your physical GPS location…");
       const loc = await realGpsRef.current.getCurrentLocation();
       loc.isCurrentGps = true;
-
-      setGpsMode("real");
-      gpsRef.current?.pause();
-      setSimRunning(false);
-      realGpsRef.current.start();
-
-      if (pointType === "start") {
-        setStartPoint(loc);
-        setVehiclePos({ ...loc, speed: loc.speed || 0, bearing: 0, isRealGps: true });
-        showToast("📍 Pickup set to your live GPS position");
-        addLog("🛰️ Pickup set to your live GPS coordinates", null);
-      } else {
-        setDestPoint(loc);
-        showToast("🏁 Destination set to your live GPS position");
-        addLog("🛰️ Destination set to your live GPS coordinates", null);
-      }
+      setStartPoint(loc);
+      setVehiclePos({ ...loc, speed: loc.speed || 0, bearing: 0, isRealGps: true });
       setMapViewCenter([loc.lat, loc.lon]);
       setMapViewZoom(16);
       setFollowVehicle(true);
+      showToast("📍 Locked to current location");
     } catch {
-      showToast("⚠️ Location permission required. Please allow access.");
-    } finally {
-      setLoading(false);
+      showToast("⚠️ Location permission required");
     }
   }
-
-
-  // ── Online Reconnection & Present Location Sync ────────
-  const prevOnlineRef = useRef(netInfo.isOnline);
-  useEffect(() => {
-    const wasOffline = !prevOnlineRef.current;
-    const isNowOnline = netInfo.isOnline;
-    prevOnlineRef.current = isNowOnline;
-
-    if (wasOffline && isNowOnline) {
-      addLog("🌐 Network restored: Refreshing route from present location", null);
-      showToast("🌐 Connected online — Route refreshed");
-
-      if (vehiclePos && destPoint) {
-        reroute(vehiclePos.lat, vehiclePos.lon);
-        setMapViewCenter([vehiclePos.lat, vehiclePos.lon]);
-        setFollowVehicle(true);
-      }
-    }
-  }, [netInfo.isOnline, vehiclePos, destPoint, reroute]);
-
 
   function handleRecenterVehicle() {
     if (vehiclePos) {
       setMapViewCenter([vehiclePos.lat, vehiclePos.lon]);
-      setMapViewZoom(16);
+      setMapViewZoom(17);
       setFollowVehicle(true);
       showToast("🎯 Centered on your location");
-      addLog("🎯 Centered on present vehicle location", null);
     } else if (startPoint) {
       setMapViewCenter([startPoint.lat, startPoint.lon]);
       setMapViewZoom(15);
       setFollowVehicle(true);
-      showToast("🎯 Centered on start location");
     }
-  }
-
-
-  // ── Simulation controls ────────────────────────────────
-  function handleStartPauseSim() {
-    const gps = gpsRef.current;
-    if (!gps) return;
-
-    const activeRoute = rerouteResult || routeResult;
-    if (!activeRoute) return;
-
-    if (simRunning) {
-      gps.pause();
-      setSimRunning(false);
-    } else {
-      if (!gps.routeCoords.length) {
-        gps.setRoute(activeRoute.coords);
-      }
-      gps.start();
-      setSimRunning(true);
-      setGpsMode("simulation");
-    }
-  }
-
-  function handleResetSim() {
-    const gps = gpsRef.current;
-    if (!gps) return;
-    gps.reset();
-    setSimRunning(false);
-    setVehiclePos(null);
-    setOffRouteInfo(null);
-    setRerouteResult(null);
-
-    if (routeResult && graphRef.current) {
-      const instrs = generateInstructions(routeResult, graphRef.current);
-      setInstructions(instrs);
-      setCurrentInstr(instrs[0] || null);
-      setDistRemaining(routeResult.distance);
-      setEta(computeETA(routeResult.distance));
-    }
-  }
-
-  function handleStray() {
-    if (gpsRef.current) gpsRef.current.strayOffRoute();
   }
 
   function handleBlockRoad() {
@@ -721,29 +592,15 @@ export default function App() {
       const fromId = activeRoute.path[aheadIdx];
       const toId = activeRoute.path[aheadIdx + 1];
       graph.blockEdge(fromId, toId);
-      addLog("🚧 Road block simulated ahead", null);
-      showToast("🚧 Road blocked ahead — Rerouting");
+      showToast("🚧 Roadblock simulated — Detour calculated");
       reroute(vehiclePos.lat, vehiclePos.lon);
-    }
-  }
-
-  function handleSpeedChange(e) {
-    const speed = Number(e.target.value);
-    setSimSpeed(speed);
-    if (gpsRef.current) gpsRef.current.setSpeed(speed);
-  }
-
-  function handleClearBlocks() {
-    if (graphRef.current) {
-      graphRef.current.clearAllBlocks();
-      addLog("✅ All road blocks cleared", null);
-      showToast("✅ Road blocks cleared");
     }
   }
 
   function handleClearRoute() {
     if (gpsRef.current) gpsRef.current.reset();
     setSimRunning(false);
+    setIsNavigating(false);
     setOffRouteInfo(null);
     setRouteResult(null);
     setRerouteResult(null);
@@ -752,7 +609,7 @@ export default function App() {
     setCurrentInstr(null);
     setDistRemaining(0);
     setEta("--");
-    setPlannerExpanded(true);
+    setShowBottomDrawer(true);
     showToast("Route cleared");
   }
 
@@ -761,77 +618,87 @@ export default function App() {
       const temp = startPoint;
       setStartPoint({ ...destPoint, isCurrentGps: false });
       setDestPoint(temp);
-      showToast("⇄ Swapped Start and Destination");
+      showToast("⇄ Swapped Start & Destination");
     }
   }
 
-  function togglePanel(key) {
-    setPanelOpen((prev) => ({ ...prev, [key]: !prev[key] }));
-  }
-
-
-  // ── Derived values ─────────────────────────────────────
   const activeRoute = rerouteResult || routeResult;
-
-  const graphEdges = useMemo(() => {
-    if (!showGraphOverlay || !roadGraph) return [];
-    return roadGraph.getAllEdgesAsCoords();
-  }, [showGraphOverlay, roadGraph]);
-
-  const pickingLabel = pickingMode === "start"
-    ? "👆 Tap map to set PICKUP location"
-    : pickingMode === "destination"
-      ? "👆 Tap map to set DESTINATION"
-      : null;
 
 
   // ══════════════════════════════════════════════════════
-  //  RENDER
+  //  RENDER (Google Maps UI)
   // ══════════════════════════════════════════════════════
 
   return (
-    <div className="app">
+    <div className="app gmap-app">
 
-      {/* ── Top Floating Header (Slim on Mobile) ─────── */}
-      <header className="top-bar">
-        <div className="top-bar-left">
-          <div className="logo">
-            <span className="logo-icon">🧭</span>
-            <span className="logo-title">AdaptiveNav</span>
+      {/* ── 1. Google Maps TOP BAR ───────────────────────── */}
+      {!isNavigating ? (
+        /* Explore / Search Capsule (Google Maps Search Bar) */
+        <div className="gmap-top-search-bar">
+          <div className="gmap-search-capsule">
+            <span className="gmap-search-icon">🔍</span>
+            <div
+              className="gmap-search-text-wrap"
+              onClick={() => {
+                setPickingMode("destination");
+                showToast("👆 Tap anywhere on the map to set Destination");
+              }}
+            >
+              {destPoint ? (
+                <span className="gmap-search-dest-active">
+                  🏁 Destination ({destPoint.lat.toFixed(3)}, {destPoint.lon.toFixed(3)})
+                </span>
+              ) : (
+                <span className="gmap-search-placeholder">
+                  Where to? Tap anywhere on map
+                </span>
+              )}
+            </div>
+
+            {/* Quick Status / GPS mode pill inside search bar */}
+            <div className="gmap-top-actions">
+              <button
+                className={`gmap-chip-btn ${gpsMode === "real" ? "gmap-chip-btn--active" : ""}`}
+                onClick={() => handleToggleGpsMode(gpsMode === "real" ? "simulation" : "real")}
+              >
+                {gpsMode === "real" ? "🛰️ GPS" : "🎮 Sim"}
+              </button>
+
+              <button
+                className="gmap-net-dot-btn"
+                onClick={() => netRef.current?.toggleSimulation()}
+                title="Toggle Online/Offline"
+              >
+                <span className={`net-status-dot net-status-dot--${netInfo.state}`}></span>
+              </button>
+            </div>
           </div>
         </div>
-
-        <div className="top-bar-right">
-          {/* Tracking Mode Pill */}
-          <div className="gps-mode-switch">
-            <button
-              className={`mode-tab ${gpsMode === "real" ? "mode-tab--active" : ""}`}
-              onClick={() => handleToggleGpsMode("real")}
-            >
-              🛰️ Live GPS
-            </button>
-            <button
-              className={`mode-tab ${gpsMode === "simulation" ? "mode-tab--active" : ""}`}
-              onClick={() => handleToggleGpsMode("simulation")}
-            >
-              🎮 Sim
-            </button>
+      ) : (
+        /* Active Turn-by-Turn Driving Maneuver Header (Google Navigation Green Card) */
+        <div className="gmap-driving-turn-header">
+          <div className="gmap-maneuver-icon-wrap">
+            <span className="gmap-turn-icon">{currentInstr?.icon || "⬆️"}</span>
           </div>
-
-          {/* Network Toggle Pill */}
-          <button
-            className="net-status-btn"
-            onClick={() => netRef.current?.toggleSimulation()}
-            title="Click to toggle Online/Offline simulation"
-          >
-            <span className={`net-status-dot net-status-dot--${netInfo.state}`}></span>
-            <span className="net-status-label">{netInfo.isOffline ? "Offline" : "Online"}</span>
-          </button>
+          <div className="gmap-turn-info">
+            <div className="gmap-turn-distance">
+              {currentInstr?.distanceM > 999
+                ? `${(currentInstr.distanceM / 1000).toFixed(1)} km`
+                : `${currentInstr?.distanceM || 0} m`}
+            </div>
+            <div className="gmap-turn-instruction">
+              {currentInstr?.text || "Continue on route"}
+            </div>
+            {currentInstr?.streetName && (
+              <div className="gmap-turn-street">{currentInstr.streetName}</div>
+            )}
+          </div>
         </div>
-      </header>
+      )}
 
 
-      {/* ── Main Map Viewport ─────────────────────────── */}
+      {/* ── 2. Full-Screen Map Viewport ─────────────────── */}
       <main className="map-wrapper">
 
         {/* Global Toast Notification */}
@@ -846,41 +713,18 @@ export default function App() {
           <div className="loading-overlay">
             <div className="loading-spinner-ring"></div>
             <div className="loading-text">{loadingMsg}</div>
-            <div className="loading-subtext">
-              High-accuracy hybrid navigation engine
-            </div>
           </div>
         )}
 
-        {/* Picking Mode Banner */}
-        {pickingLabel && (
-          <div className="picking-banner">
-            <span className="picking-banner-pulse"></span>
-            <span>{pickingLabel}</span>
-            <button
-              className="picking-cancel-btn"
-              onClick={() => setPickingMode(null)}
-            >
-              ✕ Cancel
-            </button>
-          </div>
-        )}
-
-        {/* Off-Route Alert Banner */}
+        {/* Off-Route Alert */}
         {offRouteInfo?.offRoute && (
           <div className="offroute-alert">
             <span className="offroute-alert-icon">⚡</span>
-            <div>
-              <strong>Off Route Detected</strong>
-              <div style={{ fontSize: 11, opacity: 0.9 }}>
-                Rerouting in {netInfo.isOffline ? "offline corridor A*" : "OSRM engine"}…
-              </div>
-            </div>
+            <span>Rerouting…</span>
           </div>
         )}
 
-
-        {/* Interactive Map Canvas */}
+        {/* Leaflet Map */}
         {!loading && (
           <MapContainer
             center={mapViewCenter}
@@ -905,26 +749,13 @@ export default function App() {
               onUserDrag={() => setFollowVehicle(false)}
             />
 
-            {/* Road graph overlay */}
-            {showGraphOverlay && graphEdges.map((edge, i) => (
-              <Polyline
-                key={`ge-${i}`}
-                positions={[edge.from, edge.to]}
-                pathOptions={{
-                  color: edge.blocked ? "#f43f5e" : "rgba(59, 130, 246, 0.35)",
-                  weight: edge.blocked ? 4 : 1.5,
-                  dashArray: edge.blocked ? "6 4" : undefined,
-                }}
-              />
-            ))}
-
             {/* Active Route Polyline */}
             {activeRoute && (
               <Polyline
                 positions={activeRoute.coords}
                 pathOptions={{
-                  color: rerouteResult ? "#f59e0b" : "#3b82f6",
-                  weight: 6,
+                  color: rerouteResult ? "#f59e0b" : "#2563eb",
+                  weight: 7,
                   opacity: 0.95,
                   lineCap: "round",
                   lineJoin: "round",
@@ -937,8 +768,7 @@ export default function App() {
               <Marker position={[startPoint.lat, startPoint.lon]} icon={startIcon}>
                 <Popup>
                   <div className="map-popup-card">
-                    <strong>🟢 Pickup Location</strong>
-                    <div>{startPoint.isCurrentGps ? "Your live GPS position" : `${startPoint.lat.toFixed(4)}, ${startPoint.lon.toFixed(4)}`}</div>
+                    <strong>🟢 Pickup Point</strong>
                   </div>
                 </Popup>
               </Marker>
@@ -950,7 +780,6 @@ export default function App() {
                 <Popup>
                   <div className="map-popup-card">
                     <strong>🏁 Destination</strong>
-                    <div>{destPoint.lat.toFixed(4)}, {destPoint.lon.toFixed(4)}</div>
                   </div>
                 </Popup>
               </Marker>
@@ -965,16 +794,14 @@ export default function App() {
               >
                 <Popup>
                   <div className="map-popup-card">
-                    <strong>{vehiclePos.isRealGps ? "🛰️ Your Live Position" : "🚗 Vehicle Simulator"}</strong>
-                    <div>Speed: <strong>{vehiclePos.speed || 0} km/h</strong></div>
-                    <div>Heading: {Math.round(vehiclePos.bearing || 0)}°</div>
-                    {vehiclePos.accuracy && <div>Accuracy: ±{vehiclePos.accuracy}m</div>}
+                    <strong>{vehiclePos.isRealGps ? "🛰️ Your Location" : "🚗 Vehicle"}</strong>
+                    <div>{vehiclePos.speed || 0} km/h</div>
                   </div>
                 </Popup>
               </Marker>
             )}
 
-            {/* Blocked road indicators */}
+            {/* Blocked Road Indicators */}
             {roadGraph && Array.from(roadGraph.blockedEdges).map((key) => {
               const [fromId] = key.split("-");
               const node = roadGraph.nodes[fromId];
@@ -991,7 +818,7 @@ export default function App() {
                     weight: 2,
                   }}
                 >
-                  <Popup>🚧 Road Block</Popup>
+                  <Popup>🚧 Roadblock</Popup>
                 </CircleMarker>
               );
             })}
@@ -999,216 +826,165 @@ export default function App() {
         )}
 
 
-        {/* ── Route Planning Card (Collapsible for Uncluttered Mobile View) ──── */}
-        <aside className="route-picker-panel">
-          {!plannerExpanded && activeRoute ? (
-            /* Minimized Sleek Pill on Mobile when navigating */
+        {/* ── 3. Floating Right Map Controls (Google FABs) ── */}
+        <div className="gmap-floating-fabs">
+          <button
+            className="gmap-fab"
+            onClick={handleRecenterVehicle}
+            title="Recenter on My Location"
+          >
+            🎯
+          </button>
+
+          {activeRoute && isNavigating && (
             <button
-              className="route-minimized-pill"
-              onClick={() => setPlannerExpanded(true)}
+              className="gmap-fab gmap-fab--danger"
+              onClick={handleBlockRoad}
+              title="Simulate Road Block"
             >
-              <span className="minimized-pill-dot"></span>
-              <span className="minimized-pill-title">
-                {destPoint ? "Navigating to Destination" : "Route Active"}
-              </span>
-              <span className="minimized-pill-dist">
-                {distRemaining >= 1 ? `${distRemaining.toFixed(1)} km` : `${Math.round(distRemaining * 1000)} m`}
-              </span>
-              <span className="minimized-pill-btn">Edit ▾</span>
+              🚧
             </button>
-          ) : (
-            /* Full Planner Card */
-            <div className="glass-card">
-              <div className="glass-card-header">
-                <div className="glass-card-title-wrap">
-                  <span className="glass-card-icon">📍</span>
-                  <h2 className="glass-card-title">Route Planner</h2>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {startPoint && destPoint && (
-                    <button
-                      className="btn-icon-subtle"
-                      onClick={handleSwapPoints}
-                      title="Swap Start and Destination"
-                    >
-                      ⇄
-                    </button>
-                  )}
-                  {activeRoute && (
-                    <button
-                      className="btn-icon-subtle"
-                      onClick={() => setPlannerExpanded(false)}
-                      title="Collapse to Map"
-                    >
-                      ▲
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="glass-card-body">
-                {/* Pickup Point Selection */}
-                <div className="route-input-group">
-                  <div className="route-input-label">
-                    <span className="dot dot-pickup"></span>
-                    <span>Pickup / Source</span>
-                  </div>
-                  <div className="route-btn-grid">
-                    <button
-                      className={`btn ${startPoint?.isCurrentGps ? "btn--emerald" : "btn--glass"}`}
-                      onClick={() => handleUseCurrentLocation("start")}
-                    >
-                      📍 My Location
-                    </button>
-                    <button
-                      className={`btn ${pickingMode === "start" ? "btn--primary" : "btn--glass"}`}
-                      onClick={() => setPickingMode(pickingMode === "start" ? null : "start")}
-                    >
-                      {pickingMode === "start" ? "👆 Tap Map…" : "🗺️ Set on Map"}
-                    </button>
-                  </div>
-                  {startPoint && (
-                    <div className="coord-chip">
-                      <span>{startPoint.isCurrentGps ? "🟢 Live GPS Locked" : `📌 ${startPoint.lat.toFixed(4)}, ${startPoint.lon.toFixed(4)}`}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Destination Point Selection */}
-                <div className="route-input-group" style={{ marginTop: 10 }}>
-                  <div className="route-input-label">
-                    <span className="dot dot-dest"></span>
-                    <span>Destination</span>
-                  </div>
-                  <button
-                    className={`btn btn--full ${pickingMode === "destination" ? "btn--primary" : "btn--glass"}`}
-                    onClick={() => setPickingMode(pickingMode === "destination" ? null : "destination")}
-                  >
-                    {pickingMode === "destination" ? "👆 Tap Map to Set Destination…" : "🗺️ Pick Destination on Map"}
-                  </button>
-                  {destPoint && (
-                    <div className="coord-chip">
-                      <span>🏁 ${destPoint.lat.toFixed(4)}, ${destPoint.lon.toFixed(4)}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Primary Action Button */}
-                <button
-                  className={`btn btn--primary btn--hero btn--full ${activeRoute ? "btn--hero-active" : ""}`}
-                  onClick={handleStartNavigationAction}
-                  style={{ marginTop: 12 }}
-                >
-                  {activeRoute ? (simRunning ? "⏸ Pause Navigation" : "🚀 Start Navigation") : "🧭 Calculate & Navigate"}
-                </button>
-
-                {/* Clear Route Button if Route Exists */}
-                {activeRoute && (
-                  <button
-                    className="btn btn--glass btn--sm btn--full"
-                    onClick={handleClearRoute}
-                    style={{ marginTop: 6 }}
-                  >
-                    ✕ Clear Route
-                  </button>
-                )}
-
-                {/* Sample Highway Runs */}
-                <div className="sample-routes-section">
-                  <span className="sample-routes-title">Sample Highway Runs:</span>
-                  <div className="sample-routes-grid">
-                    {SAMPLE_HIGHWAY_ROUTES.map((p) => (
-                      <button
-                        key={p.id}
-                        className="sample-route-chip"
-                        onClick={() => handleSelectSampleHighway(p)}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
           )}
-        </aside>
+
+          <button
+            className="gmap-fab"
+            onClick={() => netRef.current?.toggleSimulation()}
+            title={netInfo.isOffline ? "Restore Online" : "Simulate Offline"}
+          >
+            {netInfo.isOffline ? "🌐" : "📡"}
+          </button>
+        </div>
 
 
-        {/* ── Navigation HUD (Floating Bottom HUD) ──── */}
-        {activeRoute && !loading && (
-          <div className="nav-hud-floating">
-            <div className="nav-hud-main">
-              {/* Maneuver Big Icon */}
-              <div className="nav-maneuver-badge">
-                <span className="maneuver-icon">{currentInstr?.icon || "⬆️"}</span>
-              </div>
+        {/* ── 4. Google Maps BOTTOM SHEET (Pre-Navigation) ─── */}
+        {!isNavigating && showBottomDrawer && (
+          <div className="gmap-bottom-sheet">
+            <div className="gmap-sheet-handle"></div>
 
-              {/* Next Instruction Text */}
-              <div className="nav-instruction-wrap">
-                <div className="nav-instruction-text">{currentInstr?.text || "Continue along route"}</div>
-                {currentInstr?.streetName && (
-                  <div className="nav-street-text">{currentInstr.streetName}</div>
+            {/* Route Summary Row */}
+            <div className="gmap-sheet-header">
+              <div className="gmap-sheet-title-row">
+                <span className="gmap-sheet-title">
+                  {destPoint ? "Route Directions" : "Choose Destination"}
+                </span>
+                {destPoint && (
+                  <button className="gmap-btn-link" onClick={handleClearRoute}>
+                    ✕ Clear
+                  </button>
                 )}
               </div>
 
-              {/* Speedometer Badge */}
-              <div className="nav-speed-badge">
-                <span className="speed-val">{vehiclePos?.speed || 0}</span>
-                <span className="speed-unit">KM/H</span>
+              {/* Origin & Destination Inputs */}
+              <div className="gmap-route-inputs">
+                <div className="gmap-route-input-row" onClick={handleUseCurrentLocation}>
+                  <span className="gmap-dot gmap-dot--origin"></span>
+                  <span className="gmap-input-text">
+                    {startPoint?.isCurrentGps ? "Your current location" : "Set pickup location"}
+                  </span>
+                  <span className="gmap-input-subtext">📍 GPS</span>
+                </div>
+
+                <div
+                  className="gmap-route-input-row"
+                  onClick={() => {
+                    setPickingMode("destination");
+                    showToast("👆 Tap anywhere on map to set Destination");
+                  }}
+                >
+                  <span className="gmap-dot gmap-dot--dest"></span>
+                  <span className="gmap-input-text">
+                    {destPoint ? `Destination (${destPoint.lat.toFixed(4)}, ${destPoint.lon.toFixed(4)})` : "Tap map to set destination"}
+                  </span>
+                </div>
               </div>
+
+              {/* If Route calculated: show ETA + Blue Google Start Button */}
+              {activeRoute && (
+                <div className="gmap-route-ready-box">
+                  <div className="gmap-route-meta">
+                    <span className="gmap-route-time">{activeRoute.time} min</span>
+                    <span className="gmap-route-dist">({activeRoute.distance} km)</span>
+                    <span className="gmap-route-tag">Fastest route</span>
+                  </div>
+
+                  <button
+                    className="gmap-start-nav-btn"
+                    onClick={handleStartNavigation}
+                  >
+                    🧭 Start Navigation
+                  </button>
+                </div>
+              )}
+
+              {/* Sample Highway Runs */}
+              {!activeRoute && (
+                <div className="gmap-highway-chips-scroll">
+                  {SAMPLE_HIGHWAY_ROUTES.map((p) => (
+                    <button
+                      key={p.id}
+                      className="gmap-highway-chip"
+                      onClick={() => handleSelectSampleHighway(p)}
+                    >
+                      🛣️ {p.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
+          </div>
+        )}
 
-            {/* Navigation Metrics Strip */}
-            <div className="nav-hud-metrics">
-              <div className="metric-cell">
-                <span className="metric-val">
-                  {distRemaining >= 1
-                    ? `${distRemaining.toFixed(1)} km`
-                    : distRemaining > 0
-                      ? `${Math.round(distRemaining * 1000)} m`
-                      : `${activeRoute.distance.toFixed(1)} km`
-                  }
-                </span>
-                <span className="metric-lbl">Remaining</span>
+
+        {/* ── 5. Google Maps DRIVING HUD (Active Driving Mode) ─── */}
+        {isNavigating && activeRoute && (
+          <div className="gmap-driving-footer">
+            <div className="gmap-driving-footer-main">
+              {/* Trip Time & Distance (Large Green/Blue Text) */}
+              <div className="gmap-footer-metrics">
+                <div className="gmap-footer-time-dist">
+                  <span className="gmap-primary-eta">{eta !== "--" ? eta : computeETA(activeRoute.distance)}</span>
+                  <span className="gmap-primary-dist">
+                    {distRemaining >= 1
+                      ? `${distRemaining.toFixed(1)} km`
+                      : `${Math.round(distRemaining * 1000)} m`
+                    }
+                  </span>
+                </div>
+                <div className="gmap-footer-speed">
+                  Speed: <strong>{vehiclePos?.speed || 0} km/h</strong> • {netInfo.isOffline ? "Offline A*" : "OSRM Fast"}
+                </div>
               </div>
 
-              <div className="metric-divider"></div>
-
-              <div className="metric-cell">
-                <span className="metric-val">{eta !== "--" ? eta : computeETA(activeRoute.distance)}</span>
-                <span className="metric-lbl">Est. Time</span>
-              </div>
-
-              <div className="metric-divider"></div>
-
-              <div className="metric-cell">
-                <span className={`status-pill status-pill--${netInfo.isOffline ? "offline" : "online"}`}>
-                  {netInfo.isOffline ? "Offline A*" : "OSRM Fast"}
-                </span>
-                <span className="metric-lbl">Mode</span>
-              </div>
-            </div>
-
-            {/* Expandable Turn Directions Drawer */}
-            <div className="nav-steps-toggle-bar">
+              {/* Red Exit Navigation Button */}
               <button
-                className="btn-text-toggle"
-                onClick={() => setShowSteps(!showSteps)}
+                className="gmap-exit-nav-btn"
+                onClick={handleExitNavigation}
+                title="Exit Navigation"
               >
-                {showSteps ? "▲ Hide Turn Directions" : `▼ View ${instructions.length} Turns`}
+                ✕
               </button>
             </div>
 
-            {showSteps && instructions.length > 0 && (
-              <div className="nav-steps-list">
+            {/* Turn-by-Turn list toggle */}
+            <div className="gmap-turn-list-toggle">
+              <button
+                className="gmap-toggle-link"
+                onClick={() => setShowTurnList(!showTurnList)}
+              >
+                {showTurnList ? "▲ Hide Steps" : `▼ View ${instructions.length} Turn Directions`}
+              </button>
+            </div>
+
+            {showTurnList && (
+              <div className="gmap-steps-drawer">
                 {instructions.map((ins, idx) => (
-                  <div key={idx} className="nav-step-row">
-                    <span className="step-row-icon">{ins.icon}</span>
-                    <div className="step-row-text-wrap">
-                      <div className="step-row-text">{ins.text}</div>
-                      {ins.streetName && <div className="step-row-street">{ins.streetName}</div>}
+                  <div key={idx} className="gmap-step-item">
+                    <span className="gmap-step-icon">{ins.icon}</span>
+                    <div className="gmap-step-text-wrap">
+                      <div className="gmap-step-title">{ins.text}</div>
+                      {ins.streetName && <div className="gmap-step-sub">{ins.streetName}</div>}
                     </div>
-                    <span className="step-row-dist">
+                    <span className="gmap-step-dist">
                       {ins.distanceM > 999 ? `${(ins.distanceM / 1000).toFixed(1)} km` : `${ins.distanceM} m`}
                     </span>
                   </div>
@@ -1217,133 +993,6 @@ export default function App() {
             )}
           </div>
         )}
-
-
-        {/* ── Floating Action Buttons (FABs) ────────────────── */}
-        <div className="map-fabs-container">
-          <button
-            className="fab-btn"
-            onClick={handleRecenterVehicle}
-            title="Recenter on My Location"
-          >
-            🎯
-          </button>
-
-          {activeRoute && (
-            <button
-              className="fab-btn fab-btn--danger"
-              onClick={handleBlockRoad}
-              title="Simulate Roadblock Ahead"
-            >
-              🚧
-            </button>
-          )}
-
-          <button
-            className="fab-btn"
-            onClick={() => netRef.current?.toggleSimulation()}
-            title={netInfo.isOffline ? "Restore Online Connection" : "Simulate Going Offline"}
-          >
-            {netInfo.isOffline ? "🌐" : "📡"}
-          </button>
-        </div>
-
-
-        {/* ── Control / Debug Drawer (Desktop only, never overlaps mobile) ── */}
-        <aside className="control-panel desktop-only">
-          <div className="glass-card glass-card--sm">
-            <div
-              className="glass-card-header"
-              onClick={() => togglePanel("tracking")}
-            >
-              <div className="glass-card-title-wrap">
-                <span className="glass-card-icon">{gpsMode === "real" ? "🛰️" : "🎮"}</span>
-                <h3 className="glass-card-title">
-                  {gpsMode === "real" ? "Live Satellite GPS" : "Drive Simulator"}
-                </h3>
-              </div>
-              <span className={`panel-toggle-arrow ${panelOpen.tracking ? "open" : ""}`}>▾</span>
-            </div>
-
-            {panelOpen.tracking && (
-              <div className="glass-card-body">
-                {gpsMode === "real" ? (
-                  <div className="gps-live-dashboard">
-                    <div className="live-pill">
-                      <span className="live-dot-pulse"></span>
-                      <span>Hardware Satellites Streaming</span>
-                    </div>
-                    <div className="gps-grid-3">
-                      <div className="gps-stat-card">
-                        <span className="gps-stat-val">{vehiclePos?.speed || 0}</span>
-                        <span className="gps-stat-lbl">KM/H</span>
-                      </div>
-                      <div className="gps-stat-card">
-                        <span className="gps-stat-val">{vehiclePos?.accuracy ? `±${vehiclePos.accuracy}m` : "High"}</span>
-                        <span className="gps-stat-lbl">Accuracy</span>
-                      </div>
-                      <div className="gps-stat-card">
-                        <span className="gps-stat-val">{Math.round(vehiclePos?.bearing || 0)}°</span>
-                        <span className="gps-stat-lbl">Heading</span>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="sim-controls-wrap">
-                    <div className="btn-group">
-                      <button
-                        className={`btn ${simRunning ? "btn--danger" : "btn--primary"} btn--sm`}
-                        onClick={handleStartPauseSim}
-                        disabled={!activeRoute}
-                      >
-                        {simRunning ? "⏸ Pause" : "▶ Start Drive"}
-                      </button>
-                      <button className="btn btn--glass btn--sm" onClick={handleResetSim}>
-                        ↺ Reset
-                      </button>
-                    </div>
-
-                    <div className="speed-slider-wrap">
-                      <span className="speed-lbl">Sim Speed: <strong>{simSpeed}x</strong></span>
-                      <input
-                        type="range"
-                        className="custom-range-slider"
-                        min="1" max="10" step="1"
-                        value={simSpeed}
-                        onChange={handleSpeedChange}
-                      />
-                    </div>
-
-                    <div className="btn-group">
-                      <button
-                        className="btn btn--glass btn--sm"
-                        onClick={handleStray}
-                        disabled={!simRunning}
-                      >
-                        ↗ Stray Off
-                      </button>
-                      <button
-                        className="btn btn--danger btn--sm"
-                        onClick={handleBlockRoad}
-                        disabled={!simRunning}
-                      >
-                        🚧 Block Road
-                      </button>
-                    </div>
-
-                    <button
-                      className="btn btn--glass btn--sm btn--full"
-                      onClick={handleClearBlocks}
-                      style={{ marginTop: 6 }}
-                    >
-                      ✅ Clear All Blocks
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </aside>
 
       </main>
     </div>

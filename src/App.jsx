@@ -81,19 +81,29 @@ function createVehicleIcon(strayed, heading = 0) {
 
 
 // ── Map view controller ──────────────────────────────────
-function MapViewController({ center, zoom, vehiclePos, followVehicle, isNavigating }) {
+// ── Map view controller ──────────────────────────────────
+function MapViewController({ center, zoom, vehiclePos, followVehicle, isNavigating, activeRoute }) {
   const map = useMap();
-  const initialSet = useRef(false);
+  const lastRouteKeyRef = useRef(null);
+
+  // Auto fit route bounds when a route is computed (works for short & long distances)
+  useEffect(() => {
+    if (activeRoute && activeRoute.coords && activeRoute.coords.length > 1 && !isNavigating) {
+      const routeKey = `${activeRoute.coords[0]}-${activeRoute.coords[activeRoute.coords.length - 1]}`;
+      if (lastRouteKeyRef.current !== routeKey) {
+        lastRouteKeyRef.current = routeKey;
+        const bounds = L.latLngBounds(activeRoute.coords);
+        map.fitBounds(bounds, { padding: [60, 60], maxZoom: 16 });
+      }
+    }
+  }, [activeRoute, isNavigating, map]);
 
   useEffect(() => {
     // Only auto-pan if user is actively driving AND followVehicle is enabled
     if (isNavigating && vehiclePos && followVehicle) {
       map.panTo([vehiclePos.lat, vehiclePos.lon], { animate: true, duration: 0.4 });
-    } else if (center && !initialSet.current) {
-      map.setView(center, zoom || map.getZoom(), { animate: false });
-      initialSet.current = true;
     }
-  }, [center, zoom, vehiclePos, followVehicle, isNavigating, map]);
+  }, [vehiclePos, followVehicle, isNavigating, map]);
 
   return null;
 }
@@ -303,18 +313,24 @@ export default function App() {
   }, []);
 
 
-  // ── Map click handler (Direct 1-tap Google Maps destination picking) ─
+  // ── Map click handler (Safe explicit picking) ───────────
   function handleMapClick(lat, lon) {
     if (pickingMode === "start") {
       setStartPoint({ lat, lon, isCurrentGps: false });
+      setStartPointName(`Pickup (${lat.toFixed(3)}, ${lon.toFixed(3)})`);
+      setVehiclePos({ lat, lon, speed: 0, bearing: 0, isRealGps: false });
       setPickingMode(null);
-      showToast("📍 Start point updated");
-    } else {
-      // Default: 1-tap on map sets Destination!
+      showToast("📍 Pickup point set on map");
+    } else if (pickingMode === "destination") {
       setDestPoint({ lat, lon });
+      setDestPointName(`Destination (${lat.toFixed(3)}, ${lon.toFixed(3)})`);
       setPickingMode(null);
       setShowBottomDrawer(true);
       showToast("🏁 Destination set! Calculating route…");
+    } else {
+      // Not in picking mode: close dropdowns without overriding route
+      setShowSourceSearch(false);
+      setShowDestSearch(false);
     }
   }
 
@@ -559,9 +575,15 @@ export default function App() {
     const activeRoute = rerouteResult || routeResult;
 
     const handlePos = (pos) => {
+      // If user selected a custom source and is not yet navigating, keep vehicle at custom source
+      if (!isNavigating && !simRunning && startPoint && !startPoint.isCurrentGps && pos.isRealGps) {
+        return; // Don't let background real GPS move vehicle away from planned custom pickup
+      }
+
       setVehiclePos(pos);
 
-      if (activeRoute) {
+      // ONLY check off-route and trigger auto-rerouting during ACTIVE navigation or active simulation
+      if ((isNavigating || simRunning) && activeRoute) {
         const offInfo = isOffRoute(
           activeRoute.coords,
           pos.lat,
@@ -572,7 +594,7 @@ export default function App() {
         );
         setOffRouteInfo(offInfo);
 
-        if (offInfo.offRoute && (pos.strayed || gpsMode === "real" || isNavigating)) {
+        if (offInfo.offRoute && (pos.strayed || isNavigating)) {
           reroute(pos.lat, pos.lon, offInfo.isWrongDirection ? "wrong_direction" : "off_route");
         }
 
@@ -736,6 +758,7 @@ export default function App() {
 
     if (target === "source") {
       setStartPoint({ ...point, isCurrentGps: false });
+      setVehiclePos({ ...point, speed: 0, bearing: 0, isRealGps: false });
       setStartPointName(place.shortName);
       setSourceSearchText("");
       setSourceResults([]);
@@ -880,6 +903,7 @@ export default function App() {
               vehiclePos={vehiclePos}
               followVehicle={followVehicle}
               isNavigating={isNavigating}
+              activeRoute={activeRoute}
             />
             <MapClickHandler
               onMapClick={handleMapClick}

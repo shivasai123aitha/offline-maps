@@ -162,6 +162,7 @@ export default function App() {
   const [routeResult, setRouteResult] = useState(null);
   const [instructions, setInstructions] = useState([]);
   const [rerouteResult, setRerouteResult] = useState(null);
+  const [isRerouting, setIsRerouting] = useState(false);
 
   // ── Navigation / GPS state ─────────────────────────────
   const [vehiclePos, setVehiclePos] = useState(null);
@@ -191,7 +192,38 @@ export default function App() {
   const realGpsRef = useRef(null);
   const netRef = useRef(null);
   const graphRef = useRef(null);
+  const lastRerouteTimeRef = useRef(0);
 
+  // ── Audio Feedback Chime (Web Audio API) ───────────────
+  function playNavSound(type = "reroute") {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      if (type === "reroute") {
+        osc.frequency.setValueAtTime(440, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(780, ctx.currentTime + 0.25);
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.35);
+      } else {
+        osc.frequency.setValueAtTime(659.25, ctx.currentTime);
+        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.1, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.3);
+      }
+    } catch {
+      // Ignore audio failure
+    }
+  }
 
   // ── Toast Helper ───────────────────────────────────────
   function showToast(text, duration = 3000) {
@@ -437,12 +469,25 @@ export default function App() {
   }
 
 
-  // ── Re-route logic (adaptive) ──────────────────────────
+  // ── Re-route logic (adaptive wrong-direction / deviation) ──
   const reroute = useCallback(
-    async (lat, lon) => {
-      const graph = graphRef.current;
+    async (lat, lon, reason = "off_route") => {
       const origRoute = routeResult;
       if (!origRoute || !destPoint) return;
+
+      const now = Date.now();
+      if (now - lastRerouteTimeRef.current < 1200) {
+        return; // Debounce rapid continuous triggers
+      }
+      lastRerouteTimeRef.current = now;
+
+      setIsRerouting(true);
+      if (reason === "wrong_direction") {
+        showToast("🔄 Wrong direction detected! Updating route…", 2200);
+      } else {
+        showToast("🔄 Updating route for your location…", 1800);
+      }
+      playNavSound("reroute");
 
       if (netInfo.isOnline) {
         try {
@@ -464,29 +509,34 @@ export default function App() {
             gpsRef.current.returnToRoute();
             if (simRunning) gpsRef.current.start();
           }
+          setIsRerouting(false);
           return;
         } catch (err) {
           console.warn("Online reroute fallback:", err);
         }
       }
 
-      if (!graph) return;
-      const startResult = findNearestNode(graph.nodes, lat, lon);
-      const goalId = origRoute.path[origRoute.path.length - 1];
-      const newRoute = aStar(graph, startResult.nodeId, goalId);
+      // Offline In-Memory Corridor Graph A* Search
+      const graph = graphRef.current;
+      if (graph) {
+        const startResult = findNearestNode(graph.nodes, lat, lon);
+        const goalId = origRoute.path[origRoute.path.length - 1];
+        const newRoute = aStar(graph, startResult.nodeId, goalId);
 
-      if (newRoute) {
-        setRerouteResult(newRoute);
-        const newInstrs = generateInstructions(newRoute, graph);
-        setInstructions(newInstrs);
-        setCurrentInstr(newInstrs[0] || null);
+        if (newRoute) {
+          setRerouteResult(newRoute);
+          const newInstrs = generateInstructions(newRoute, graph);
+          setInstructions(newInstrs);
+          setCurrentInstr(newInstrs[0] || null);
 
-        if (gpsRef.current) {
-          gpsRef.current.setRoute(newRoute.coords);
-          gpsRef.current.returnToRoute();
-          if (simRunning) gpsRef.current.start();
+          if (gpsRef.current) {
+            gpsRef.current.setRoute(newRoute.coords);
+            gpsRef.current.returnToRoute();
+            if (simRunning) gpsRef.current.start();
+          }
         }
       }
+      setIsRerouting(false);
     },
     [routeResult, destPoint, netInfo.isOnline, simRunning]
   );
@@ -500,11 +550,18 @@ export default function App() {
       setVehiclePos(pos);
 
       if (activeRoute) {
-        const offInfo = isOffRoute(activeRoute.coords, pos.lat, pos.lon, 50);
+        const offInfo = isOffRoute(
+          activeRoute.coords,
+          pos.lat,
+          pos.lon,
+          pos.bearing,
+          pos.speed || 0,
+          35
+        );
         setOffRouteInfo(offInfo);
 
-        if (offInfo.offRoute && (pos.strayed || gpsMode === "real")) {
-          reroute(pos.lat, pos.lon);
+        if (offInfo.offRoute && (pos.strayed || gpsMode === "real" || isNavigating)) {
+          reroute(pos.lat, pos.lon, offInfo.isWrongDirection ? "wrong_direction" : "off_route");
         }
 
         if (instructions.length > 0) {
@@ -529,7 +586,7 @@ export default function App() {
       if (unsubSim) unsubSim();
       if (unsubReal) unsubReal();
     };
-  }, [routeResult, rerouteResult, instructions, reroute, gpsMode]);
+  }, [routeResult, rerouteResult, instructions, reroute, gpsMode, isNavigating]);
 
 
   // ── Real Mobile GPS & Tracking handlers ────────────────
@@ -727,11 +784,11 @@ export default function App() {
           </div>
         )}
 
-        {/* Off-Route Alert */}
-        {offRouteInfo?.offRoute && (
+        {/* Adaptive Reroute Alert */}
+        {(isRerouting || offRouteInfo?.offRoute) && (
           <div className="offroute-alert">
-            <span className="offroute-alert-icon">⚡</span>
-            <span>Rerouting…</span>
+            <span className="gmap-spin-icon">🔄</span>
+            <span>{offRouteInfo?.isWrongDirection ? "Wrong direction • Recalculating…" : "Recalculating route…"}</span>
           </div>
         )}
 

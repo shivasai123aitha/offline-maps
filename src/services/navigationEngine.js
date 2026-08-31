@@ -202,13 +202,36 @@ export function findPositionOnRoute(routeCoords, lat, lon) {
 
 
 /**
- * Check if the user is off-route.
- * Returns true if distance from route > thresholdMeters.
+ * Check if the user is off-route or heading in the wrong direction.
+ * Returns true if distance from route > thresholdMeters OR if vehicle is moving opposite to route bearing.
  */
-export function isOffRoute(routeCoords, lat, lon, thresholdMeters = 50) {
+export function isOffRoute(routeCoords, lat, lon, heading = null, speed = 0, thresholdMeters = 35) {
+  if (!routeCoords || routeCoords.length === 0) {
+    return { offRoute: false, isDiverged: false, isWrongDirection: false, distanceFromRoute: 0, nearestIndex: 0, progress: 0 };
+  }
+
   const pos = findPositionOnRoute(routeCoords, lat, lon);
+  
+  let isWrongDirection = false;
+  if (speed > 4 && heading !== null && heading !== undefined && !isNaN(heading) && pos.index < routeCoords.length - 1) {
+    const nextCoord = routeCoords[pos.index + 1];
+    const curCoord = routeCoords[pos.index];
+    const expectedBearing = bearing(
+      { lat: curCoord[0], lon: curCoord[1] },
+      { lat: nextCoord[0], lon: nextCoord[1] }
+    );
+    let diff = Math.abs(expectedBearing - heading);
+    if (diff > 180) diff = 360 - diff;
+    if (diff > 105) {
+      isWrongDirection = true;
+    }
+  }
+
+  const isDiverged = pos.distance > thresholdMeters;
   return {
-    offRoute: pos.distance > thresholdMeters,
+    offRoute: isDiverged || isWrongDirection,
+    isDiverged,
+    isWrongDirection,
     distanceFromRoute: pos.distance,
     nearestIndex: pos.index,
     progress: pos.progress,

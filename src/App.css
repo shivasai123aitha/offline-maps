@@ -349,24 +349,20 @@
 .gmap-route-inputs {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 6px;
   background: rgba(0, 0, 0, 0.4);
   padding: 12px 14px;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.08);
+  position: relative;
 }
 
-.gmap-route-input-row {
+/* ── Search Input Group (Source / Destination) ── */
+.gmap-search-input-group {
   display: flex;
   align-items: center;
-  gap: 12px;
-  cursor: pointer;
-  padding: 4px 0;
-  transition: opacity 0.2s;
-}
-
-.gmap-route-input-row:hover {
-  opacity: 0.85;
+  gap: 10px;
+  padding: 3px 0;
 }
 
 .gmap-dot {
@@ -384,6 +380,155 @@
 .gmap-dot--dest {
   background: #f43f5e;
   box-shadow: 0 0 10px #f43f5e;
+}
+
+.gmap-input-field-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.gmap-input-display {
+  font-size: 13.5px;
+  color: #94a3b8;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: all 0.2s ease;
+}
+
+.gmap-input-display:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+}
+
+.gmap-text-input {
+  width: 100%;
+  font-size: 13.5px;
+  color: #f1f5f9;
+  font-weight: 500;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1.5px solid rgba(59, 130, 246, 0.5);
+  outline: none;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.15);
+  caret-color: #60a5fa;
+  font-family: inherit;
+  transition: all 0.2s ease;
+}
+
+.gmap-text-input::placeholder {
+  color: #64748b;
+  font-weight: 400;
+}
+
+.gmap-text-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 18px rgba(59, 130, 246, 0.25);
+}
+
+/* GPS & Map Pin buttons */
+.gmap-gps-btn,
+.gmap-map-pin-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e2e8f0;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gmap-gps-btn:hover {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: #10b981;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+}
+
+.gmap-map-pin-btn:hover {
+  background: rgba(244, 63, 94, 0.2);
+  border-color: #f43f5e;
+  box-shadow: 0 0 10px rgba(244, 63, 94, 0.3);
+}
+
+.gmap-gps-btn:active,
+.gmap-map-pin-btn:active {
+  transform: scale(0.9);
+}
+
+/* ── Search Results Dropdown ── */
+.gmap-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: rgba(10, 15, 28, 0.98);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 12px;
+  overflow: hidden;
+  max-height: 220px;
+  overflow-y: auto;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+  animation: fadeIn 0.2s ease-out;
+}
+
+.gmap-search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.gmap-search-result-item:hover {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.gmap-search-result-item:active {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.gmap-result-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+
+.gmap-result-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.gmap-result-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gmap-result-full {
+  font-size: 11px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
 }
 
 .gmap-input-text {

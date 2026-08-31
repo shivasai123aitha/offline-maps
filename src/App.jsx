@@ -1015,42 +1015,102 @@ export default function App() {
               {/* Origin & Destination Inputs with Text Search */}
               <div className="gmap-route-inputs">
 
-                {/* ── SOURCE INPUT ── */}
-                <div className="gmap-search-input-group">
-                  <span className="gmap-dot gmap-dot--origin"></span>
-                  <div className="gmap-input-field-wrap">
-                    {showSourceSearch ? (
-                      <input
-                        type="text"
-                        className="gmap-text-input"
-                        placeholder="Search pickup location…"
-                        value={sourceSearchText}
-                        onChange={(e) => handleSearchInput(e.target.value, "source")}
-                        autoFocus
-                      />
-                    ) : (
-                      <div
-                        className="gmap-input-display"
-                        onClick={() => setShowSourceSearch(true)}
+                {/* ── SOURCE SELECTION: Two Clear Options ── */}
+                <div className="gmap-source-container">
+                  <div className="gmap-source-row-top">
+                    <span className="gmap-dot gmap-dot--origin"></span>
+                    <span className="gmap-source-title">Starting Point:</span>
+
+                    {/* Dual Option Pills */}
+                    <div className="gmap-source-pill-group">
+                      <button
+                        type="button"
+                        className={`gmap-source-pill ${startPoint?.isCurrentGps ? "gmap-source-pill--active" : ""}`}
+                        onClick={() => {
+                          setShowSourceSearch(false);
+                          setSourceResults([]);
+                          setSourceSearchText("");
+                          handleUseCurrentLocation();
+                        }}
+                        title="Use device live GPS coordinates"
                       >
-                        {startPoint?.isCurrentGps
-                          ? "📍 Your current location"
-                          : startPointName || "Enter pickup location"}
+                        <span className="gmap-pill-icon">📍</span> Current Location
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`gmap-source-pill ${!startPoint?.isCurrentGps && (showSourceSearch || startPointName || startPoint) ? "gmap-source-pill--active" : ""}`}
+                        onClick={() => {
+                          setShowSourceSearch(true);
+                          if (startPointName) setSourceSearchText(startPointName);
+                        }}
+                        title="Search any street, city, or place"
+                      >
+                        <span className="gmap-pill-icon">🔍</span> Search Place
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Input / Display for Source */}
+                  <div className="gmap-source-input-field-wrap">
+                    {startPoint?.isCurrentGps && !showSourceSearch ? (
+                      <div
+                        className="gmap-input-display gmap-input-display--gps"
+                        onClick={() => handleUseCurrentLocation()}
+                      >
+                        <span className="gmap-gps-live-dot"></span>
+                        <span className="gmap-input-gps-text">
+                          Your Current Location ({startPoint.lat.toFixed(4)}, {startPoint.lon.toFixed(4)})
+                        </span>
+                        <button
+                          type="button"
+                          className="gmap-mini-edit-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowSourceSearch(true);
+                          }}
+                        >
+                          Change ✏️
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="gmap-source-search-bar-row">
+                        <input
+                          type="text"
+                          className="gmap-text-input"
+                          placeholder="Type pickup place, city, or address…"
+                          value={sourceSearchText}
+                          onChange={(e) => handleSearchInput(e.target.value, "source")}
+                          onFocus={() => setShowSourceSearch(true)}
+                          autoFocus={showSourceSearch}
+                        />
+                        {sourceSearchText && (
+                          <button
+                            type="button"
+                            className="gmap-clear-search-btn"
+                            onClick={() => {
+                              setSourceSearchText("");
+                              setSourceResults([]);
+                            }}
+                            title="Clear search text"
+                          >
+                            ✕
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="gmap-map-pin-btn"
+                          onClick={() => {
+                            setPickingMode("start");
+                            showToast("👆 Tap anywhere on map to set Pickup point");
+                          }}
+                          title="Pick on map"
+                        >
+                          🗺️
+                        </button>
                       </div>
                     )}
                   </div>
-                  <button
-                    className="gmap-gps-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowSourceSearch(false);
-                      setSourceResults([]);
-                      handleUseCurrentLocation();
-                    }}
-                    title="Use current GPS location"
-                  >
-                    📍
-                  </button>
                 </div>
 
                 {/* Source search results dropdown */}
@@ -1073,40 +1133,53 @@ export default function App() {
                 )}
 
                 {/* ── DESTINATION INPUT ── */}
-                <div className="gmap-search-input-group">
-                  <span className="gmap-dot gmap-dot--dest"></span>
-                  <div className="gmap-input-field-wrap">
-                    {showDestSearch ? (
+                <div className="gmap-dest-container">
+                  <div className="gmap-dest-row-top">
+                    <span className="gmap-dot gmap-dot--dest"></span>
+                    <span className="gmap-dest-title">Destination:</span>
+                    {destPointName && (
+                      <span className="gmap-dest-badge-name">🏁 {destPointName}</span>
+                    )}
+                  </div>
+
+                  <div className="gmap-dest-search-bar-row">
+                    <div className="gmap-input-field-wrap">
                       <input
                         type="text"
                         className="gmap-text-input"
-                        placeholder="Search destination…"
+                        placeholder={destPointName || "Type destination city, place, or address…"}
                         value={destSearchText}
                         onChange={(e) => handleSearchInput(e.target.value, "destination")}
-                        autoFocus
+                        onFocus={() => setShowDestSearch(true)}
                       />
-                    ) : (
-                      <div
-                        className="gmap-input-display"
-                        onClick={() => setShowDestSearch(true)}
+                    </div>
+                    {destSearchText && (
+                      <button
+                        type="button"
+                        className="gmap-clear-search-btn"
+                        onClick={() => {
+                          setDestSearchText("");
+                          setDestResults([]);
+                        }}
+                        title="Clear text"
                       >
-                        {destPointName || (destPoint ? `${destPoint.lat.toFixed(4)}, ${destPoint.lon.toFixed(4)}` : "Enter destination")}
-                      </div>
+                        ✕
+                      </button>
                     )}
+                    <button
+                      type="button"
+                      className="gmap-map-pin-btn"
+                      onClick={() => {
+                        setShowDestSearch(false);
+                        setDestResults([]);
+                        setPickingMode("destination");
+                        showToast("👆 Tap anywhere on map to set Destination");
+                      }}
+                      title="Pick on map"
+                    >
+                      🗺️
+                    </button>
                   </div>
-                  <button
-                    className="gmap-map-pin-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowDestSearch(false);
-                      setDestResults([]);
-                      setPickingMode("destination");
-                      showToast("👆 Tap anywhere on map to set Destination");
-                    }}
-                    title="Pick on map"
-                  >
-                    🗺️
-                  </button>
                 </div>
 
                 {/* Destination search results dropdown */}

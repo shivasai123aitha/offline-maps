@@ -1,9 +1,12 @@
-name: Build Android APK
+name: Build Android Release APK
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -25,7 +28,7 @@ jobs:
           node-version: 20
 
       - name: Install Web Dependencies
-        run: npm install
+        run: npm ci || npm install
 
       - name: Build Web Bundle
         run: npm run build
@@ -39,13 +42,31 @@ jobs:
       - name: Make Gradle Executable
         run: chmod +x android/gradlew
 
-      - name: Build Debug APK
+      - name: Build Signed Release APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AdaptiveNav-Android-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: AdaptiveNav-Release-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v1.0.0-release
+          name: "AdaptiveNav v1.0.0 (Release APK)"
+          body: |
+            ## 🚀 AdaptiveNav Release APK
+            - Dual geocoding support (Worldwide search)
+            - Compact Google Maps-style navigation UI
+            - Intelligent auto-rerouting on wrong direction
+            - In-memory offline A* corridor routing & live OSRM navigation
+            
+            **Download and install `app-release.apk` below directly on Android!**
+          files: android/app/build/outputs/apk/release/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -58,11 +58,15 @@ const startIcon = L.divIcon({
 
 const destIcon = L.divIcon({
   className: "",
-  html: `<div class="gmap-pin gmap-pin--dest">
-    <div class="gmap-dest-flag">🏁</div>
+  html: `<div style="position:relative;width:28px;height:40px">
+    <svg viewBox="0 0 28 40" width="28" height="40">
+      <path d="M14 0C6.3 0 0 6.3 0 14c0 10.5 14 26 14 26s14-15.5 14-26C28 6.3 21.7 0 14 0z" fill="#EA4335"/>
+      <circle cx="14" cy="14" r="6" fill="#B31412"/>
+      <circle cx="14" cy="14" r="4" fill="white"/>
+    </svg>
   </div>`,
-  iconSize: [32, 32],
-  iconAnchor: [16, 30],
+  iconSize: [28, 40],
+  iconAnchor: [14, 40],
 });
 
 function createVehicleIcon(strayed, heading = 0) {
@@ -73,6 +77,7 @@ function createVehicleIcon(strayed, heading = 0) {
         <div class="gmap-radar-ring"></div>
         <div class="gmap-nav-chevron ${strayed ? "gmap-nav-chevron--strayed" : ""}"></div>
       </div>
+
     `,
     iconSize: [36, 36],
     iconAnchor: [18, 18],
@@ -747,10 +752,10 @@ export default function App() {
     }
 
     searchTimerRef.current = setTimeout(async () => {
-      const results = await searchPlaces(text, 5);
+      const results = await searchPlaces(text, 8);
       if (target === "source") setSourceResults(results);
       else setDestResults(results);
-    }, 400);
+    }, 250);
   }
 
   function handleSelectPlace(place, target) {
@@ -916,9 +921,9 @@ export default function App() {
               <Polyline
                 positions={activeRoute.coords}
                 pathOptions={{
-                  color: rerouteResult ? "#f59e0b" : "#2563eb",
-                  weight: 7,
-                  opacity: 0.95,
+                  color: rerouteResult ? "#fbbc04" : "#4285F4",
+                  weight: 6,
+                  opacity: 1,
                   lineCap: "round",
                   lineJoin: "round",
                 }}
